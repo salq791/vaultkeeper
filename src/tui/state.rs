@@ -41,30 +41,146 @@ pub enum ActionKind {
     Verify,
 }
 
-/// Draft state for the add/edit source form. Only `Mode::SourceForm`'s
-/// existence is part of this task's frozen contract; `SourceForm`'s own
-/// field layout is this implementer's judgment call for Task 5 to build on
-/// and adjust as needed.
-#[allow(dead_code)]
+/// Field labels for `SourceForm::fields`, in the exact pinned order the
+/// contract requires: index is load-bearing (tests and `validate` both index
+/// positionally), and the trailing `secrets_json` entry is the only masked
+/// field.
+const SOURCE_FORM_LABELS: [&str; 9] = [
+    "name",
+    "engine",
+    "schedule",
+    "verify_schedule",
+    "retention",
+    "healthchecks_uuid",
+    "verify_healthchecks_uuid",
+    "settings_json",
+    "secrets_json",
+];
+
+/// Draft state for the add/edit source form. `fields` holds the nine
+/// label/value pairs above in pinned order; `editing` names the source being
+/// edited (`None` for a fresh add); `focus` indexes the field currently
+/// receiving keystrokes.
 pub struct SourceForm {
     pub editing: Option<String>,
-    pub name: TextField,
-    pub engine: TextField,
-    pub schedule: TextField,
-    pub verify_schedule: TextField,
-    pub retention: TextField,
-    pub healthchecks_uuid: TextField,
-    pub verify_healthchecks_uuid: TextField,
-    pub settings_json: TextField,
-    pub secrets_json: TextField,
-    pub keep_secrets: bool,
     pub focus: usize,
+    pub fields: Vec<(String, TextField)>,
+}
+
+impl SourceForm {
+    pub fn new_add() -> SourceForm {
+        let fields = SOURCE_FORM_LABELS
+            .iter()
+            .map(|label| {
+                (
+                    (*label).to_string(),
+                    TextField::new(*label == "secrets_json"),
+                )
+            })
+            .collect();
+        SourceForm {
+            editing: None,
+            focus: 0,
+            fields,
+        }
+    }
+
+    /// Pre-fills every field from `meta` except secrets, which always stays
+    /// empty: secret material is write-only from the TUI's perspective and
+    /// never round-trips back into the form for display.
+    pub fn new_edit(meta: &crate::store::SourceMeta) -> SourceForm {
+        let mut form = SourceForm::new_add();
+        form.editing = Some(meta.name.clone());
+        form.fields[0].1.set(&meta.name);
+        form.fields[1].1.set(&meta.engine);
+        form.fields[2].1.set(&meta.schedule);
+        form.fields[3]
+            .1
+            .set(meta.verify_schedule.as_deref().unwrap_or(""));
+        form.fields[4].1.set(&format!(
+            "{},{},{}",
+            meta.retention.daily, meta.retention.weekly, meta.retention.monthly
+        ));
+        form.fields[5]
+            .1
+            .set(meta.healthchecks_uuid.as_deref().unwrap_or(""));
+        form.fields[6]
+            .1
+            .set(meta.verify_healthchecks_uuid.as_deref().unwrap_or(""));
+        form.fields[7]
+            .1
+            .set(&serde_json::to_string(&meta.settings).unwrap_or_else(|_| "{}".to_string()));
+        // fields[8] (secrets_json) intentionally left empty.
+        form
+    }
+
+    /// Builds a `NewSource` from the current field values, and reports
+    /// whether the caller should keep the source's existing secrets blob
+    /// (true iff this is an edit and the secrets field was left blank).
+    pub fn validate(&self) -> anyhow::Result<(crate::store::NewSource, bool)> {
+        use anyhow::Context;
+
+        let name = self.fields[0].1.value().to_string();
+        crate::store::validate_name(&name)?;
+
+        let engine = self.fields[1].1.value().to_string();
+        crate::engines::engine_for(&engine)?;
+
+        let schedule = self.fields[2].1.value().to_string();
+        crate::schedule::validate(&schedule)?;
+
+        let verify_schedule = Self::non_empty(self.fields[3].1.value());
+        if let Some(vs) = &verify_schedule {
+            crate::schedule::validate(vs)?;
+        }
+
+        let retention = crate::types::Retention::parse_csv(self.fields[4].1.value())?;
+
+        let healthchecks_uuid = Self::non_empty(self.fields[5].1.value());
+        let verify_healthchecks_uuid = Self::non_empty(self.fields[6].1.value());
+
+        let settings_raw = self.fields[7].1.value();
+        let settings: serde_json::Value = if settings_raw.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(settings_raw).context("invalid settings JSON")?
+        };
+
+        let secrets_raw = self.fields[8].1.value();
+        let keep_secrets = self.editing.is_some() && secrets_raw.is_empty();
+        let secrets: std::collections::HashMap<String, String> = if secrets_raw.trim().is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            serde_json::from_str(secrets_raw).context("invalid secrets JSON")?
+        };
+
+        Ok((
+            crate::store::NewSource {
+                name,
+                engine,
+                schedule,
+                verify_schedule,
+                retention,
+                healthchecks_uuid,
+                verify_healthchecks_uuid,
+                settings,
+                secrets,
+            },
+            keep_secrets,
+        ))
+    }
+
+    fn non_empty(s: &str) -> Option<String> {
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
+    }
 }
 
 pub enum Mode {
     Browse,
-    // Consumed by plan-6 Task 5 (source add/edit form).
-    #[allow(dead_code)]
     SourceForm(Box<SourceForm>),
     // Consumed by plan-6 Task 6 (restore target entry).
     #[allow(dead_code)]
@@ -99,15 +215,11 @@ pub enum Command {
         snapshot: String,
         target: Option<String>,
     },
-    // Consumed by plan-6 Task 5 (save source form).
-    #[allow(dead_code)]
     SaveSource {
         draft: crate::store::NewSource,
         editing: Option<String>,
         keep_secrets: bool,
     },
-    // Consumed by plan-6 Task 5 (enable/disable toggle).
-    #[allow(dead_code)]
     SetEnabled(String, bool),
 }
 
@@ -202,8 +314,7 @@ impl App {
                 }
                 None
             }
-            // Task 5 wires source-form key handling (text entry, save/cancel).
-            Mode::SourceForm(_) => None,
+            Mode::SourceForm(_) => self.handle_source_form_key(key),
             // Task 6 wires restore-target text entry.
             Mode::RestoreTarget { .. } => None,
             // Task 6 wires restore confirm/cancel.
@@ -237,8 +348,87 @@ impl App {
             KeyCode::Char('r') => self.run_action(false),
             KeyCode::Char('v') => self.run_action(true),
             KeyCode::Enter => self.enter_action(),
+            KeyCode::Char('a') => self.open_add_form(),
+            KeyCode::Char('e') => self.open_edit_form(),
+            KeyCode::Char('d') => self.toggle_enabled(),
             _ => None,
         }
+    }
+
+    /// Routes keys while `Mode::SourceForm` is active: Esc cancels back to
+    /// Browse without touching the form; Up/Down move focus between the nine
+    /// fields; Enter validates and either produces `Command::SaveSource`
+    /// (closing the form) or leaves the form open with the error on the
+    /// status line; every other key is forwarded to the focused field so
+    /// typing/backspace edit it.
+    fn handle_source_form_key(&mut self, key: KeyEvent) -> Option<Command> {
+        if matches!(key.code, KeyCode::Esc) {
+            self.mode = Mode::Browse;
+            return None;
+        }
+        let Mode::SourceForm(form) = &mut self.mode else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Up => {
+                form.focus = form.focus.saturating_sub(1);
+                None
+            }
+            KeyCode::Down => {
+                if form.focus + 1 < form.fields.len() {
+                    form.focus += 1;
+                }
+                None
+            }
+            KeyCode::Enter => match form.validate() {
+                Ok((draft, keep_secrets)) => {
+                    let editing = form.editing.clone();
+                    self.mode = Mode::Browse;
+                    Some(Command::SaveSource {
+                        draft,
+                        editing,
+                        keep_secrets,
+                    })
+                }
+                Err(e) => {
+                    self.status_line = format!("{e:#}");
+                    None
+                }
+            },
+            _ => {
+                form.fields[form.focus].1.handle(key);
+                None
+            }
+        }
+    }
+
+    /// Opens a blank add form; only meaningful on the Sources tab.
+    fn open_add_form(&mut self) -> Option<Command> {
+        if !matches!(self.tab, Tab::Sources) {
+            return None;
+        }
+        self.mode = Mode::SourceForm(Box::new(SourceForm::new_add()));
+        None
+    }
+
+    /// Opens an edit form pre-filled from the currently selected source;
+    /// only meaningful on the Sources tab, and a no-op with no selection.
+    fn open_edit_form(&mut self) -> Option<Command> {
+        if !matches!(self.tab, Tab::Sources) {
+            return None;
+        }
+        let form = SourceForm::new_edit(self.selected_source()?);
+        self.mode = Mode::SourceForm(Box::new(form));
+        None
+    }
+
+    /// `d` on the Sources tab flips the selected source's enabled flag.
+    fn toggle_enabled(&self) -> Option<Command> {
+        if !matches!(self.tab, Tab::Sources) {
+            return None;
+        }
+        let s = self.selected_source()?;
+        Some(Command::SetEnabled(s.name.clone(), !s.enabled))
     }
 
     fn move_selection(&mut self, delta: i64) {
@@ -261,11 +451,21 @@ impl App {
         *sel = next as usize;
     }
 
+    /// Rider (3): dedupes against `busy` the same way `enter_action` already
+    /// does for snapshot loads, so a held-down `r`/`v` never queues a second
+    /// backup/verify worker for a source whose run is still in flight.
     fn run_action(&self, verify: bool) -> Option<Command> {
         if !matches!(self.tab, Tab::Dashboard | Tab::Sources) {
             return None;
         }
         let name = self.selected_source()?.name.clone();
+        let kind = if verify { "verify" } else { "backup" };
+        if self
+            .busy
+            .contains(&crate::tui::data::action_label(kind, &name))
+        {
+            return None;
+        }
         Some(if verify {
             Command::RunVerify(name)
         } else {
@@ -429,5 +629,84 @@ pub(crate) mod tests {
         let dbg = format!("{c:?}");
         assert!(!dbg.contains("secretpw"));
         assert!(dbg.contains("a-db"));
+    }
+
+    // --- Plan 6 Task 5: source management ---
+
+    #[test]
+    fn a_opens_add_form_and_esc_cancels() {
+        let mut app = App::new();
+        app.tab = Tab::Sources;
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Char('a'))).is_none());
+        assert!(matches!(app.mode, Mode::SourceForm(_)));
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Esc)).is_none());
+        assert!(matches!(app.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn edit_prefills_all_but_secrets() {
+        let form = SourceForm::new_edit(&meta("a-db"));
+        assert_eq!(form.editing.as_deref(), Some("a-db"));
+        assert_eq!(form.fields[0].1.value(), "a-db");
+        assert_eq!(form.fields[4].1.value(), "7,4,6");
+        assert_eq!(
+            form.fields[8].1.value(),
+            "",
+            "secrets never round-trip into the form"
+        );
+        assert!(form.fields[8].1.masked);
+    }
+
+    #[test]
+    fn validate_keep_secrets_semantics() {
+        let mut form = SourceForm::new_edit(&meta("a-db"));
+        let (_, keep) = form.validate().unwrap();
+        assert!(keep, "empty secrets on edit keeps the blob");
+        form.fields[8].1.set(r#"{"password":"new"}"#);
+        let (draft, keep) = form.validate().unwrap();
+        assert!(!keep);
+        assert_eq!(draft.secrets.get("password").unwrap(), "new");
+    }
+
+    #[test]
+    fn validate_rejects_bad_schedule_and_engine() {
+        let mut form = SourceForm::new_add();
+        form.fields[0].1.set("x-db");
+        form.fields[1].1.set("postgres");
+        form.fields[2].1.set("banana");
+        assert!(form.validate().is_err());
+        form.fields[2].1.set("0 2 * * *");
+        form.fields[1].1.set("nosuchengine");
+        assert!(form.validate().is_err());
+    }
+
+    #[test]
+    fn d_toggles_enabled() {
+        let mut app = App::new();
+        app.tab = Tab::Sources;
+        app.sources = vec![meta("a-db")];
+        match app.handle_key(KeyEvent::from(KeyCode::Char('d'))) {
+            Some(Command::SetEnabled(n, en)) => {
+                assert_eq!(n, "a-db");
+                assert!(!en);
+            }
+            other => panic!("expected SetEnabled, got {other:?}"),
+        }
+    }
+
+    // Rider (3): r/v must dedupe against `busy` the same way Enter already
+    // does on the Snapshots tab, so a held-down key never queues a second
+    // backup/verify worker for a source whose run is still in flight.
+    #[test]
+    fn double_press_run_or_verify_is_noop_while_busy() {
+        let mut app = App::new();
+        app.sources = vec![meta("a-db")];
+        app.busy
+            .push(crate::tui::data::action_label("backup", "a-db"));
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Char('r'))).is_none());
+        app.busy.clear();
+        app.busy
+            .push(crate::tui::data::action_label("verify", "a-db"));
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Char('v'))).is_none());
     }
 }

@@ -1,14 +1,13 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
-/// Exercised directly by this file's unit tests below; wired into the TUI's
-/// `SourceForm`/`RestoreTarget`/`ConfirmRestore` modes by plan-6 Tasks 5-6.
-#[allow(dead_code)]
+/// A single editable, optionally-masked text field. Wired into
+/// `SourceForm` by plan-6 Task 5; `RestoreTarget`/`ConfirmRestore` (Task 6)
+/// will reuse it too.
 pub struct TextField {
     pub masked: bool,
     buffer: String,
 }
 
-#[allow(dead_code)]
 impl TextField {
     pub fn new(masked: bool) -> TextField {
         TextField {

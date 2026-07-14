@@ -108,6 +108,41 @@ impl DataHub {
         });
     }
 
+    /// Synchronous source save: adds a brand-new source when `editing` is
+    /// `None`, otherwise updates the source currently named by `editing`'s
+    /// value. Runs on the render thread rather than a spawned worker: it's a
+    /// single fast SQLite write, and mod.rs's dispatch needs its result
+    /// immediately (to refresh the source list) rather than as a later
+    /// channel event.
+    pub fn save_source(
+        &self,
+        draft: &crate::store::NewSource,
+        editing: &Option<String>,
+        keep_secrets: bool,
+    ) -> anyhow::Result<String> {
+        let store =
+            crate::store::Store::open(&self.db_path, crate::crypto::MasterKey::from_env()?)?;
+        match editing {
+            Some(original) => store.update_source(original, draft, keep_secrets)?,
+            None => {
+                store.add_source(draft)?;
+            }
+        }
+        Ok(format!("saved source {}", draft.name))
+    }
+
+    /// Synchronous enable/disable toggle; same rationale as `save_source`
+    /// above (fast SQLite write, no worker thread needed).
+    pub fn set_enabled(&self, name: &str, enabled: bool) -> anyhow::Result<String> {
+        let store =
+            crate::store::Store::open(&self.db_path, crate::crypto::MasterKey::from_env()?)?;
+        store.set_enabled(name, enabled)?;
+        Ok(format!(
+            "{name} {}",
+            if enabled { "enabled" } else { "disabled" }
+        ))
+    }
+
     /// Lists `name`'s snapshots on a background thread, sorted newest first
     /// (parsed RFC3339 time, same comparator as `restic::latest_snapshot`
     /// but reversed since that helper wants oldest-last for `.pop()`).

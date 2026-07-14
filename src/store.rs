@@ -1,7 +1,7 @@
 use crate::crypto::MasterKey;
 use crate::types::Retention;
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 
 pub struct Store {
@@ -49,8 +49,7 @@ pub struct SourceMeta {
     pub verify_healthchecks_uuid: Option<String>,
     // Raw per-engine JSON (host/port/etc): the Sources tab shows every other
     // field but not this one (no generic tabular rendering for arbitrary
-    // JSON); Task 5's source-edit form is the field's real consumer.
-    #[allow(dead_code)]
+    // JSON); `SourceForm::new_edit` is the field's real consumer.
     pub settings: serde_json::Value,
     pub enabled: bool,
 }
@@ -241,8 +240,11 @@ impl Store {
     /// currently named `original_name`. `keep_secrets: true` leaves the
     /// existing sealed blob untouched (used when a TUI edit form's secrets
     /// field was left blank); `false` seals `s.secrets` fresh in its place.
-    // Consumed by plan-6 TUI tasks (SaveSource command handling in data.rs).
-    #[allow(dead_code)]
+    ///
+    /// When renaming (`s.name != original_name`), pre-checks for a name
+    /// collision and bails with a friendly error rather than letting the
+    /// UPDATE hit `sources.name`'s UNIQUE constraint and surface a raw
+    /// sqlite error to the TUI's status line.
     pub fn update_source(
         &self,
         original_name: &str,
@@ -250,6 +252,19 @@ impl Store {
         keep_secrets: bool,
     ) -> Result<()> {
         crate::store::validate_name(&s.name)?;
+        if s.name != original_name {
+            let collision: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM sources WHERE name = ?1",
+                    params![s.name],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if collision.is_some() {
+                bail!("a source named '{}' already exists", s.name);
+            }
+        }
         let n = if keep_secrets {
             self.conn.execute(
                 "UPDATE sources SET name=?2, engine=?3, schedule=?4, verify_schedule=?5,
@@ -710,6 +725,31 @@ mod tests {
         let row = st.get_source("acme-db").unwrap();
         assert_eq!(row.schedule, "0 3 * * *");
         assert_eq!(row.secrets.get("password").unwrap(), "pw", "blob preserved");
+    }
+
+    // Rider (2): the missing coverage gap for update_source's unknown-name
+    // path (add_get_roundtrip etc. never exercised it).
+    #[test]
+    fn update_source_unknown_original_name_errors() {
+        let st = store();
+        let err = st.update_source("ghost", &sample(), true).unwrap_err();
+        assert!(err.to_string().contains("no source named"));
+    }
+
+    // Rider (1): renaming onto an existing source's name must surface a
+    // friendly error instead of a raw sqlite UNIQUE-constraint message.
+    #[test]
+    fn update_source_rename_collision_is_friendly_error() {
+        let st = store();
+        st.add_source(&sample()).unwrap();
+        let mut other = sample();
+        other.name = "other-db".into();
+        st.add_source(&other).unwrap();
+
+        let mut edited = sample();
+        edited.name = "other-db".into();
+        let err = st.update_source("acme-db", &edited, true).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "got: {err}");
     }
 
     #[test]

@@ -123,10 +123,31 @@ fn dispatch(app: &mut state::App, hub: &data::DataHub, cmd: state::Command) {
         }
         // Deferred to Task 6: restore confirmation.
         state::Command::Restore { .. } => {}
-        // Deferred to Task 5: source add/edit form save.
-        state::Command::SaveSource { .. } => {}
-        // Deferred to Task 5: enable/disable toggle.
-        state::Command::SetEnabled(..) => {}
+        // Runs synchronously (fast SQLite op, no worker thread): no busy
+        // label, status line and source-list refresh happen immediately.
+        state::Command::SaveSource {
+            draft,
+            editing,
+            keep_secrets,
+        } => match hub.save_source(&draft, &editing, keep_secrets) {
+            Ok(msg) => {
+                app.status_line = format!("done: {msg}");
+                if let Ok(ev) = hub.refresh() {
+                    apply(app, ev);
+                }
+            }
+            Err(e) => app.status_line = format!("FAILED: {e:#}"),
+        },
+        // Same synchronous shape as SaveSource above.
+        state::Command::SetEnabled(name, enabled) => match hub.set_enabled(&name, enabled) {
+            Ok(msg) => {
+                app.status_line = format!("done: {msg}");
+                if let Ok(ev) = hub.refresh() {
+                    apply(app, ev);
+                }
+            }
+            Err(e) => app.status_line = format!("FAILED: {e:#}"),
+        },
         // Matched in the event loop above; never reaches dispatch.
         state::Command::Quit | state::Command::Refresh => {}
     }
@@ -183,12 +204,81 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_deferred_commands_are_noop() {
+    fn dispatch_restore_is_still_deferred_noop() {
         let hub = data::DataHub::new(test_cfg(), "does-not-exist.db".into()).unwrap();
         let mut app = App::new();
-        dispatch(&mut app, &hub, Command::SetEnabled("a-db".into(), false));
+        dispatch(
+            &mut app,
+            &hub,
+            Command::Restore {
+                source: "a-db".into(),
+                snapshot: "snap1".into(),
+                target: None,
+            },
+        );
         assert!(app.busy.is_empty());
         assert!(app.status_line.is_empty());
+    }
+
+    /// SaveSource/SetEnabled run synchronously (no worker thread, no busy
+    /// label): unlike RunBackup/RunVerify/LoadSnapshots above, `dispatch`
+    /// itself performs the SQLite write and sets `status_line` directly.
+    /// There's no source named "a-db" in this freshly-created test db, so
+    /// this deterministically takes the error path regardless of whether
+    /// VAULTKEEPER_MASTER_KEY happens to be set in the test environment.
+    #[test]
+    fn dispatch_set_enabled_runs_synchronously_with_no_busy_label() {
+        let hub = data::DataHub::new(test_cfg(), "does-not-exist-set-enabled.db".into()).unwrap();
+        let mut app = App::new();
+        dispatch(&mut app, &hub, Command::SetEnabled("a-db".into(), false));
+        assert!(
+            app.busy.is_empty(),
+            "sync source-management actions never use busy labels"
+        );
+        assert!(
+            app.status_line.starts_with("FAILED:"),
+            "no source named a-db exists in the fresh test db: {}",
+            app.status_line
+        );
+    }
+
+    #[test]
+    fn dispatch_save_source_runs_synchronously_with_no_busy_label() {
+        let hub = data::DataHub::new(test_cfg(), "does-not-exist-save-source.db".into()).unwrap();
+        let mut app = App::new();
+        let draft = crate::store::NewSource {
+            name: "a-db".into(),
+            engine: "postgres".into(),
+            schedule: "0 2 * * *".into(),
+            verify_schedule: None,
+            retention: crate::types::Retention {
+                daily: 7,
+                weekly: 4,
+                monthly: 6,
+            },
+            healthchecks_uuid: None,
+            verify_healthchecks_uuid: None,
+            settings: serde_json::json!({}),
+            secrets: std::collections::HashMap::new(),
+        };
+        dispatch(
+            &mut app,
+            &hub,
+            Command::SaveSource {
+                draft,
+                editing: None,
+                keep_secrets: false,
+            },
+        );
+        assert!(
+            app.busy.is_empty(),
+            "sync source-management actions never use busy labels"
+        );
+        assert!(
+            app.status_line.starts_with("FAILED:") || app.status_line.starts_with("done:"),
+            "unexpected status line: {}",
+            app.status_line
+        );
     }
 
     #[test]

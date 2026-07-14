@@ -35,6 +35,9 @@ pub fn render(f: &mut Frame, app: &App) {
     if matches!(app.mode, Mode::Help) {
         render_help_overlay(f, area);
     }
+    if let Mode::SourceForm(form) = &app.mode {
+        render_source_form_overlay(f, form, area);
+    }
 }
 
 fn tab_index(tab: Tab) -> usize {
@@ -312,6 +315,36 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+/// Renders the add/edit source form as a centered overlay: each field shows
+/// as `label: value`, with the focused field reverse-highlighted. The
+/// secrets field always goes through `field.display()` like every other
+/// field, so its masked (`***`) rendering is not a special case here at
+/// all: masking is `TextField`'s job, not the renderer's.
+fn render_source_form_overlay(f: &mut Frame, form: &crate::tui::state::SourceForm, area: Rect) {
+    let popup = centered_rect(70, 70, area);
+    let lines: Vec<Line> = form
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, (label, field))| {
+            let text = format!("{label}: {}", field.display());
+            if i == form.focus {
+                Line::from(text).style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                Line::from(text)
+            }
+        })
+        .collect();
+    f.render_widget(Clear, popup);
+    let title = if form.editing.is_some() {
+        "Edit source (Up/Down: field, Enter: save, Esc: cancel)"
+    } else {
+        "Add source (Up/Down: field, Enter: save, Esc: cancel)"
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    f.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
 fn render_help_overlay(f: &mut Frame, area: Rect) {
     let popup = centered_rect(60, 60, area);
     let lines = [
@@ -321,6 +354,9 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
         "Up/Down   move selection",
         "r         run backup on selected source",
         "v         run verify on selected source",
+        "a         (Sources tab) add a source",
+        "e         (Sources tab) edit selected source",
+        "d         (Sources tab) toggle enabled/disabled",
         "?         toggle this help",
     ]
     .join("\n");
@@ -381,6 +417,24 @@ mod tests {
         term.draw(|f| render(f, &app)).unwrap();
         let text = format!("{:?}", term.backend().buffer());
         assert!(text.contains("busy: backup acme-db"));
+    }
+
+    #[test]
+    fn source_form_overlay_masks_secrets_field() {
+        let mut app = crate::tui::state::App::new();
+        app.tab = Tab::Sources;
+        let mut form = crate::tui::state::SourceForm::new_add();
+        form.fields[8].1.set("hunter2");
+        app.mode = Mode::SourceForm(Box::new(form));
+        let backend = TestBackend::new(100, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render(f, &app)).unwrap();
+        let text = format!("{:?}", term.backend().buffer());
+        assert!(!text.contains("hunter2"), "raw secret must never render");
+        assert!(
+            text.contains("*******"),
+            "masked value should render instead"
+        );
     }
 
     #[test]
