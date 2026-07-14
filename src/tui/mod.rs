@@ -96,11 +96,11 @@ fn apply(app: &mut state::App, ev: data::Event) {
 
 /// Wiring point for Tasks 4-6: Quit and Refresh are handled in the event
 /// loop above (they don't need `hub` beyond a synchronous refresh), so
-/// every remaining `Command` variant lands here. Task 4 wires
-/// LoadSnapshots/RunBackup/RunVerify onto spawned workers (busy label +
-/// status line + a `DataHub` call, never blocking this thread); Task 5
-/// wires SaveSource/SetEnabled, Task 6 wires Restore, so those three arms
-/// stay intentionally empty for now.
+/// every remaining `Command` variant lands here. LoadSnapshots/RunBackup/
+/// RunVerify/Restore dispatch onto spawned workers (busy label + status
+/// line + a `DataHub` call, never blocking this thread); SaveSource/
+/// SetEnabled run synchronously instead (fast SQLite writes with no worker
+/// thread needed).
 fn dispatch(app: &mut state::App, hub: &data::DataHub, cmd: state::Command) {
     match cmd {
         state::Command::LoadSnapshots(name) => {
@@ -121,8 +121,16 @@ fn dispatch(app: &mut state::App, hub: &data::DataHub, cmd: state::Command) {
             app.status_line = format!("running: {label}");
             hub.spawn_verify(name);
         }
-        // Deferred to Task 6: restore confirmation.
-        state::Command::Restore { .. } => {}
+        state::Command::Restore {
+            source,
+            snapshot,
+            target,
+        } => {
+            let label = data::action_label("restore", &source);
+            app.busy.push(label.clone());
+            app.status_line = format!("running: {label}");
+            hub.spawn_restore(source, snapshot, target);
+        }
         // Runs synchronously (fast SQLite op, no worker thread): no busy
         // label, status line and source-list refresh happen immediately.
         state::Command::SaveSource {
@@ -204,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_restore_is_still_deferred_noop() {
+    fn dispatch_restore_pushes_busy_label_and_status() {
         let hub = data::DataHub::new(test_cfg(), "does-not-exist.db".into()).unwrap();
         let mut app = App::new();
         dispatch(
@@ -216,8 +224,8 @@ mod tests {
                 target: None,
             },
         );
-        assert!(app.busy.is_empty());
-        assert!(app.status_line.is_empty());
+        assert_eq!(app.busy, vec!["restore a-db".to_string()]);
+        assert_eq!(app.status_line, "running: restore a-db");
     }
 
     /// SaveSource/SetEnabled run synchronously (no worker thread, no busy

@@ -190,14 +190,10 @@ impl SourceForm {
 pub enum Mode {
     Browse,
     SourceForm(Box<SourceForm>),
-    // Consumed by plan-6 Task 6 (restore target entry).
-    #[allow(dead_code)]
     RestoreTarget {
         snapshot_id: String,
         field: TextField,
     },
-    // Consumed by plan-6 Task 6 (restore confirmation).
-    #[allow(dead_code)]
     ConfirmRestore {
         snapshot_id: String,
         target: Option<String>,
@@ -216,8 +212,6 @@ pub enum Command {
     LoadSnapshots(String),
     RunBackup(String),
     RunVerify(String),
-    // Consumed by plan-6 Task 6 (confirm restore).
-    #[allow(dead_code)]
     Restore {
         source: String,
         snapshot: String,
@@ -323,10 +317,8 @@ impl App {
                 None
             }
             Mode::SourceForm(_) => self.handle_source_form_key(key),
-            // Task 6 wires restore-target text entry.
-            Mode::RestoreTarget { .. } => None,
-            // Task 6 wires restore confirm/cancel.
-            Mode::ConfirmRestore { .. } => None,
+            Mode::RestoreTarget { .. } => self.handle_restore_target_key(key),
+            Mode::ConfirmRestore { .. } => self.handle_confirm_restore_key(key),
         }
     }
 
@@ -359,6 +351,7 @@ impl App {
             KeyCode::Char('a') => self.open_add_form(),
             KeyCode::Char('e') => self.open_edit_form(),
             KeyCode::Char('d') => self.toggle_enabled(),
+            KeyCode::Char('R') => self.restore_action(),
             _ => None,
         }
     }
@@ -503,6 +496,128 @@ impl App {
             return None;
         }
         Some(Command::LoadSnapshots(name))
+    }
+
+    /// `R` on the Snapshots tab opens the restore-target prompt for the
+    /// currently selected snapshot. Guarded like `enter_action`: only fires
+    /// when `snapshots_for` names the same source currently selected (a
+    /// stale snapshot list from a previously-viewed source must never
+    /// become a restore target) and a snapshot row actually exists to
+    /// select. The field starts masked since the target may be a
+    /// password-bearing database URL.
+    fn restore_action(&mut self) -> Option<Command> {
+        if !matches!(self.tab, Tab::Snapshots) {
+            return None;
+        }
+        let name = self.selected_source()?.name.clone();
+        if self.snapshots_for.as_deref() != Some(name.as_str()) {
+            return None;
+        }
+        let snapshot_id = self.snapshots.get(self.sel_snapshot)?.id.clone();
+        self.mode = Mode::RestoreTarget {
+            snapshot_id,
+            field: TextField::new(true),
+        };
+        None
+    }
+
+    /// Routes keys while `Mode::RestoreTarget` is active: Esc cancels the
+    /// whole flow back to Browse (this is the first step, so there's
+    /// nowhere else to back out to); Enter advances to `Mode::ConfirmRestore`,
+    /// collapsing a blank/whitespace-only field to `target: None` (same
+    /// blankness rule `SourceForm::non_empty` uses) so downstream code can
+    /// tell "no override" apart from "empty string override"; every other
+    /// key is forwarded to the masked field.
+    fn handle_restore_target_key(&mut self, key: KeyEvent) -> Option<Command> {
+        if matches!(key.code, KeyCode::Esc) {
+            self.mode = Mode::Browse;
+            return None;
+        }
+        let Mode::RestoreTarget { snapshot_id, field } = &mut self.mode else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                let snapshot_id = snapshot_id.clone();
+                let value = field.value();
+                let target = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                };
+                self.mode = Mode::ConfirmRestore {
+                    snapshot_id,
+                    target,
+                    typed: TextField::new(false),
+                };
+                None
+            }
+            _ => {
+                field.handle(key);
+                None
+            }
+        }
+    }
+
+    /// Routes keys while `Mode::ConfirmRestore` is active: Esc backs out one
+    /// step to `Mode::RestoreTarget` (not all the way to Browse, so a
+    /// misfired Esc doesn't discard the target just entered), carrying the
+    /// previously entered target back into the field; Enter only produces
+    /// `Command::Restore` when the typed text exactly matches the
+    /// *selected source's* name, returning to `Mode::Browse`; any other
+    /// typed text sets the status line instruction and stays put so a typo
+    /// can be corrected without restarting the flow; every other key is
+    /// forwarded to the typed field.
+    fn handle_confirm_restore_key(&mut self, key: KeyEvent) -> Option<Command> {
+        if matches!(key.code, KeyCode::Esc) {
+            let Mode::ConfirmRestore {
+                snapshot_id,
+                target,
+                ..
+            } = &self.mode
+            else {
+                return None;
+            };
+            let mut field = TextField::new(true);
+            if let Some(t) = target {
+                field.set(t);
+            }
+            self.mode = Mode::RestoreTarget {
+                snapshot_id: snapshot_id.clone(),
+                field,
+            };
+            return None;
+        }
+        let source = self.selected_source()?.name.clone();
+        let Mode::ConfirmRestore {
+            snapshot_id,
+            target,
+            typed,
+        } = &mut self.mode
+        else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                if typed.value() == source {
+                    let snapshot = snapshot_id.clone();
+                    let target = target.clone();
+                    self.mode = Mode::Browse;
+                    Some(Command::Restore {
+                        source,
+                        snapshot,
+                        target,
+                    })
+                } else {
+                    self.status_line = "type the source name exactly to confirm".to_string();
+                    None
+                }
+            }
+            _ => {
+                typed.handle(key);
+                None
+            }
+        }
     }
 }
 
@@ -746,5 +861,77 @@ pub(crate) mod tests {
         app.busy
             .push(crate::tui::data::action_label("verify", "a-db"));
         assert!(app.handle_key(KeyEvent::from(KeyCode::Char('v'))).is_none());
+    }
+
+    // --- Plan 6 Task 6: restore flow ---
+
+    fn snapshots_ready(app: &mut App) {
+        app.sources = vec![meta("a-db")];
+        app.tab = Tab::Snapshots;
+        app.snapshots_for = Some("a-db".into());
+        app.snapshots = vec![crate::restic::Snapshot {
+            id: "deadbeef".into(),
+            time: "2026-07-14T02:00:00Z".into(),
+            tags: vec!["source=a-db".into()],
+        }];
+    }
+
+    #[test]
+    fn restore_flow_requires_exact_typed_name() {
+        let mut app = App::new();
+        snapshots_ready(&mut app);
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Char('R'))).is_none());
+        assert!(matches!(app.mode, Mode::RestoreTarget { .. }));
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Enter)).is_none());
+        assert!(matches!(app.mode, Mode::ConfirmRestore { .. }));
+        for c in "wrong".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert!(
+            app.handle_key(KeyEvent::from(KeyCode::Enter)).is_none(),
+            "wrong name blocks"
+        );
+        if let Mode::ConfirmRestore { typed, .. } = &mut app.mode {
+            typed.set("a-db");
+        } else {
+            panic!("mode lost");
+        }
+        match app.handle_key(KeyEvent::from(KeyCode::Enter)) {
+            Some(Command::Restore {
+                source,
+                snapshot,
+                target,
+            }) => {
+                assert_eq!(source, "a-db");
+                assert_eq!(snapshot, "deadbeef");
+                assert!(target.is_none());
+            }
+            other => panic!("expected Restore, got {other:?}"),
+        }
+        assert!(matches!(app.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn restore_target_field_is_masked() {
+        let mut app = App::new();
+        snapshots_ready(&mut app);
+        app.handle_key(KeyEvent::from(KeyCode::Char('R')));
+        if let Mode::RestoreTarget { field, .. } = &app.mode {
+            assert!(field.masked, "target may carry a password");
+        } else {
+            panic!("wrong mode");
+        }
+    }
+
+    #[test]
+    fn esc_backs_out_of_restore_flow() {
+        let mut app = App::new();
+        snapshots_ready(&mut app);
+        app.handle_key(KeyEvent::from(KeyCode::Char('R')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::RestoreTarget { .. }));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::Browse));
     }
 }

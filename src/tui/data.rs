@@ -176,6 +176,54 @@ impl DataHub {
             }
         });
     }
+
+    /// Restores `snapshot` for `source` on a background thread; same
+    /// ActionDone/ActionFailed shape as `spawn_backup`/`spawn_verify`
+    /// above, but `execute_restore` returns `Result<()>` rather than an
+    /// `Output` with a `status` field, so the done message is a fixed
+    /// "success" rather than an echoed status string.
+    ///
+    /// A blank `target` (`None`) falls back to `VAULTKEEPER_RESTORE_TARGET`,
+    /// mirroring the CLI's own resolution in `main.rs`'s `Restore` arm, so
+    /// the TUI's "blank uses VAULTKEEPER_RESTORE_TARGET" hint is honest.
+    ///
+    /// `force_same_host` and `confirm_remote_overwrite` are always passed
+    /// as `false` here and are not settable from the TUI at all: those
+    /// guards stay CLI-only by design, so a restore that would overwrite a
+    /// live same-host target or a populated remote target still requires
+    /// dropping to the CLI and passing the explicit flag there.
+    pub fn spawn_restore(&self, source: String, snapshot: String, target: Option<String>) {
+        let tx = self.tx.clone();
+        let cfg = self.cfg.clone();
+        let db = self.db_path.clone();
+        std::thread::spawn(move || {
+            let label = action_label("restore", &source);
+            let target = target.or_else(|| {
+                std::env::var("VAULTKEEPER_RESTORE_TARGET")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            });
+            let res = crate::exec::execute_restore(
+                &cfg,
+                &db,
+                &source,
+                Some(&snapshot),
+                target.as_deref(),
+                false,
+                false,
+            );
+            let _ = match res {
+                Ok(()) => tx.send(Event::ActionDone {
+                    message: format!("{label}: success"),
+                    label,
+                }),
+                Err(e) => tx.send(Event::ActionFailed {
+                    message: format!("{label}: {e:#}"),
+                    label,
+                }),
+            };
+        });
+    }
 }
 
 /// The canonical identity of an in-flight action: dispatch pushes this

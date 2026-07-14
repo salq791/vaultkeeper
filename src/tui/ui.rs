@@ -38,6 +38,17 @@ pub fn render(f: &mut Frame, app: &App) {
     if let Mode::SourceForm(form) = &app.mode {
         render_source_form_overlay(f, form, area);
     }
+    if let Mode::RestoreTarget { snapshot_id, field } = &app.mode {
+        render_restore_target_overlay(f, snapshot_id, field, area);
+    }
+    if let Mode::ConfirmRestore {
+        snapshot_id,
+        target,
+        typed,
+    } = &app.mode
+    {
+        render_confirm_restore_overlay(f, app, snapshot_id, target, typed, area);
+    }
 }
 
 fn tab_index(tab: Tab) -> usize {
@@ -345,6 +356,65 @@ fn render_source_form_overlay(f: &mut Frame, form: &crate::tui::state::SourceFor
     f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
+/// Renders the restore-target prompt: the snapshot being restored, the hint
+/// explaining the blank-uses-env fallback, and the field's `display()`
+/// (masked, since a target may carry a password). Like the source form
+/// overlay above, masking is `TextField`'s job: this renderer always calls
+/// `field.display()` and never touches the raw buffer.
+fn render_restore_target_overlay(
+    f: &mut Frame,
+    snapshot_id: &str,
+    field: &crate::tui::input::TextField,
+    area: Rect,
+) {
+    let popup = centered_rect(70, 30, area);
+    let lines = vec![
+        Line::from(format!("snapshot: {}", short_id(snapshot_id))),
+        Line::from("target url, blank uses VAULTKEEPER_RESTORE_TARGET; input hidden".to_string()),
+        Line::from(field.display()),
+    ];
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Restore target (Enter: continue, Esc: cancel)");
+    f.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// Renders the typed-confirmation prompt: snapshot id, whether a target
+/// override was set (`set`) or the environment fallback will apply (`env`),
+/// the instruction to type the source name exactly, and the typed field
+/// itself (unmasked, since a source name is not a secret).
+fn render_confirm_restore_overlay(
+    f: &mut Frame,
+    app: &App,
+    snapshot_id: &str,
+    target: &Option<String>,
+    typed: &crate::tui::input::TextField,
+    area: Rect,
+) {
+    let popup = centered_rect(70, 30, area);
+    let source_name = app
+        .selected_source()
+        .map(|s| s.name.as_str())
+        .unwrap_or("?");
+    let lines = vec![
+        Line::from(format!("snapshot: {}", short_id(snapshot_id))),
+        Line::from(format!(
+            "target: {}",
+            if target.is_some() { "set" } else { "env" }
+        )),
+        Line::from(format!(
+            "type the source name exactly to confirm: {source_name}"
+        )),
+        Line::from(typed.display()),
+    ];
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Confirm restore (Enter: confirm, Esc: back)");
+    f.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
 fn render_help_overlay(f: &mut Frame, area: Rect) {
     let popup = centered_rect(60, 60, area);
     let lines = [
@@ -357,6 +427,7 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
         "a         (Sources tab) add a source",
         "e         (Sources tab) edit selected source",
         "d         (Sources tab) toggle enabled/disabled",
+        "R         (Snapshots tab) restore selected snapshot",
         "?         toggle this help",
     ]
     .join("\n");
@@ -435,6 +506,30 @@ mod tests {
             text.contains("*******"),
             "masked value should render instead"
         );
+    }
+
+    #[test]
+    fn restore_target_overlay_masks_input() {
+        let mut app = crate::tui::state::App::new();
+        let mut field = crate::tui::input::TextField::new(true);
+        field.set("supersecretpw");
+        app.mode = Mode::RestoreTarget {
+            snapshot_id: "deadbeef".to_string(),
+            field,
+        };
+        let backend = TestBackend::new(100, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render(f, &app)).unwrap();
+        let text = format!("{:?}", term.backend().buffer());
+        assert!(
+            !text.contains("supersecretpw"),
+            "raw typed target must never render"
+        );
+        assert!(
+            text.contains("*************"),
+            "masked value should render instead"
+        );
+        assert!(text.contains("VAULTKEEPER_RESTORE_TARGET"));
     }
 
     #[test]
