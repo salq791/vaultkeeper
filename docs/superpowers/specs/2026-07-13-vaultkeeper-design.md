@@ -158,6 +158,8 @@ Dumps are written uncompressed (pg_dump `--compress=0`, mongodump without `--gzi
 
 Screens: Dashboard (sources, last/next run, status colors), History (runs, filterable, log tail on failures), Sources (add/edit/disable; credential forms write the encrypted blob), Snapshots (per source, sizes, dates), Actions (run now, verify now, restore with typed-name confirmation).
 
+Restore-point selection: the restore flow starts on the Snapshots screen. Every snapshot restic retains under the source's retention policy is a selectable restore point, listed with date, size, and snapshot ID. The user picks a snapshot (default: latest), then a target, then confirms by typing the source name. The same selection exists on the CLI via `--snapshot <id>`.
+
 The TUI runs via `docker exec -it vaultkeeper vaultkeeper tui`. It reads the same SQLite store and invokes the same internal command paths as the CLI. It never holds decrypted secrets in screen state; credential fields display as masked once saved.
 
 ## Notifications
