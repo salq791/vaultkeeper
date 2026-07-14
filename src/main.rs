@@ -50,6 +50,7 @@ enum SourceCmd {
         schedule: String,
         #[arg(long)]
         settings_json: String,
+        /// JSON object of secret values, or '-' to read the JSON from stdin (recommended; keeps secrets out of argv and shell history)
         #[arg(long)]
         secrets_json: String,
         /// daily,weekly,monthly (default 7,4,6)
@@ -126,6 +127,14 @@ fn main() -> Result<()> {
                 healthchecks_uuid,
             } => {
                 engines::engine_for(&engine)?;
+                let secrets_json = if secrets_json == "-" {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                        .context("failed to read secrets JSON from stdin")?;
+                    buf
+                } else {
+                    secrets_json
+                };
                 let st = open_store()?;
                 st.add_source(&store::NewSource {
                     name: name.clone(),
@@ -137,7 +146,9 @@ fn main() -> Result<()> {
                     settings: serde_json::from_str(&settings_json)
                         .context("invalid --settings-json")?,
                     secrets: serde_json::from_str::<HashMap<String, String>>(&secrets_json)
-                        .context("invalid --secrets-json")?,
+                        .map_err(|_| {
+                            anyhow::anyhow!("invalid --secrets-json: pass a JSON object of string values (content not shown)")
+                        })?,
                 })?;
                 println!("added source {name}");
                 Ok(())
