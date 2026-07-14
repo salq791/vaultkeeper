@@ -39,7 +39,7 @@ pub fn timeout_from_settings(settings: &serde_json::Value) -> std::time::Duratio
         .get("timeout_minutes")
         .and_then(|v| v.as_u64())
         .unwrap_or(60);
-    std::time::Duration::from_secs(mins * 60)
+    std::time::Duration::from_secs(mins.saturating_mul(60))
 }
 
 #[cfg(test)]
@@ -81,6 +81,14 @@ mod tests {
         assert_eq!(
             timeout_from_settings(&serde_json::json!({"timeout_minutes": 5})),
             std::time::Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn timeout_saturates_on_absurd_values() {
+        assert_eq!(
+            timeout_from_settings(&serde_json::json!({"timeout_minutes": u64::MAX})),
+            std::time::Duration::from_secs(u64::MAX)
         );
     }
 }

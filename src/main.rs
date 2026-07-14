@@ -184,7 +184,7 @@ fn main() -> Result<()> {
             let mut repo =
                 restic::ResticCli::new(cfg.global.restic_repo, cfg.global.restic_password);
             if let Some(mins) = cfg.global.restic_timeout_minutes {
-                repo = repo.with_timeout(std::time::Duration::from_secs(mins * 60));
+                repo = repo.with_timeout(std::time::Duration::from_secs(mins.saturating_mul(60)));
             }
             use restic::Repo as _;
             repo.ensure_init()?;
@@ -201,7 +201,7 @@ fn main() -> Result<()> {
             let mut repo =
                 restic::ResticCli::new(cfg.global.restic_repo, cfg.global.restic_password);
             if let Some(mins) = cfg.global.restic_timeout_minutes {
-                repo = repo.with_timeout(std::time::Duration::from_secs(mins * 60));
+                repo = repo.with_timeout(std::time::Duration::from_secs(mins.saturating_mul(60)));
             }
             use restic::Repo as _;
             let tag = source.map(|s| format!("source={s}"));
