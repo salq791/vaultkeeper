@@ -157,6 +157,9 @@ mod tests {
         fn snapshots(&self, _tag: Option<&str>) -> Result<Vec<Snapshot>> {
             Ok(vec![])
         }
+        fn restore(&self, _id: &str, _d: &Path) -> Result<()> {
+            Ok(())
+        }
     }
 
     struct PruneFailRepo;
@@ -176,6 +179,9 @@ mod tests {
         fn snapshots(&self, _tag: Option<&str>) -> Result<Vec<Snapshot>> {
             Ok(vec![])
         }
+        fn restore(&self, _id: &str, _d: &Path) -> Result<()> {
+            Ok(())
+        }
     }
 
     struct InitFailRepo;
@@ -191,6 +197,9 @@ mod tests {
         }
         fn snapshots(&self, _t: Option<&str>) -> Result<Vec<Snapshot>> {
             Ok(vec![])
+        }
+        fn restore(&self, _id: &str, _d: &Path) -> Result<()> {
+            Ok(())
         }
     }
 

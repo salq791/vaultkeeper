@@ -10,7 +10,7 @@ pub struct BackupSummary {
     pub total_bytes_processed: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Snapshot {
     pub id: String,
     pub time: String,
@@ -23,6 +23,8 @@ pub trait Repo {
     fn backup(&self, path: &Path, tag: &str) -> Result<BackupSummary>;
     fn forget(&self, tag: &str, retention: &Retention) -> Result<()>;
     fn snapshots(&self, tag: Option<&str>) -> Result<Vec<Snapshot>>;
+    #[allow(dead_code)]
+    fn restore(&self, snapshot_id: &str, dest: &Path) -> Result<()>; // Consumed by Task 6: verify flow
 }
 
 pub fn parse_backup_output(out: &str) -> Result<BackupSummary> {
@@ -53,6 +55,20 @@ pub fn forget_args(tag: &str, r: &Retention) -> Vec<String> {
         r.monthly.to_string(),
         "--json".into(),
     ]
+}
+
+#[allow(dead_code)]
+pub fn latest_snapshot(repo: &dyn Repo, tag: &str) -> Result<Snapshot> {
+    // Consumed by Task 6: verify flow
+    let mut snaps = repo.snapshots(Some(tag))?;
+    snaps.sort_by_key(|s| {
+        chrono::DateTime::parse_from_rfc3339(&s.time)
+            .map(|t| t.timestamp())
+            .unwrap_or(i64::MIN)
+    });
+    snaps
+        .pop()
+        .with_context(|| format!("no snapshots found for {tag}"))
 }
 
 pub struct ResticCli {
@@ -133,6 +149,16 @@ impl Repo for ResticCli {
         }
         parse_snapshots(&self.run(&args)?)
     }
+
+    fn restore(&self, snapshot_id: &str, dest: &Path) -> Result<()> {
+        self.run(&[
+            "restore".into(),
+            snapshot_id.into(),
+            "--target".into(),
+            dest.display().to_string(),
+        ])
+        .map(|_| ())
+    }
 }
 
 #[cfg(test)]
@@ -189,5 +215,52 @@ mod tests {
                 "--json"
             ]
         );
+    }
+
+    struct FakeRepo(Vec<Snapshot>);
+    impl Repo for FakeRepo {
+        fn ensure_init(&self) -> Result<()> {
+            Ok(())
+        }
+        fn backup(&self, _p: &std::path::Path, _t: &str) -> Result<BackupSummary> {
+            unreachable!()
+        }
+        fn forget(&self, _t: &str, _r: &crate::types::Retention) -> Result<()> {
+            unreachable!()
+        }
+        fn snapshots(&self, _t: Option<&str>) -> Result<Vec<Snapshot>> {
+            Ok(self.0.clone())
+        }
+        fn restore(&self, _id: &str, _d: &std::path::Path) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn latest_snapshot_picks_newest_by_parsed_time() {
+        let repo = FakeRepo(vec![
+            Snapshot {
+                id: "old".into(),
+                time: "2026-07-01T02:00:00+02:00".into(),
+                tags: vec![],
+            },
+            Snapshot {
+                id: "new".into(),
+                time: "2026-07-13T22:00:00-04:00".into(),
+                tags: vec![],
+            },
+            Snapshot {
+                id: "mid".into(),
+                time: "2026-07-10T02:00:00Z".into(),
+                tags: vec![],
+            },
+        ]);
+        assert_eq!(latest_snapshot(&repo, "source=x").unwrap().id, "new");
+    }
+
+    #[test]
+    fn latest_snapshot_errors_when_empty() {
+        let err = latest_snapshot(&FakeRepo(vec![]), "source=x").unwrap_err();
+        assert!(err.to_string().contains("source=x"));
     }
 }
