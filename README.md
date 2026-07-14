@@ -24,7 +24,7 @@ retention pruning, append-only capability.
 ## Roadmap to v1
 
 - [x] Design spec
-- [ ] Core backup path (Postgres -> restic)
+- [x] Core backup path (Postgres -> restic)
 - [ ] MongoDB, Supabase Storage, Supabase Edge Functions engines
 - [ ] Built-in scheduler, healthchecks.io / webhook / SES alerting
 - [ ] Restore command + scheduled restore verification
