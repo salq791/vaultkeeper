@@ -5,6 +5,8 @@ mod config;
 #[allow(dead_code)]
 mod crypto;
 #[allow(dead_code)]
+mod restic;
+#[allow(dead_code)]
 mod store;
 #[allow(dead_code)]
 mod types;

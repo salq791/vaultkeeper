@@ -1,0 +1,184 @@
+use crate::types::Retention;
+use anyhow::{bail, Context, Result};
+use serde::Deserialize;
+use std::path::Path;
+use std::process::Command;
+
+#[derive(Debug, Deserialize)]
+pub struct BackupSummary {
+    pub snapshot_id: String,
+    pub total_bytes_processed: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Snapshot {
+    pub id: String,
+    pub time: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+pub trait Repo {
+    fn ensure_init(&self) -> Result<()>;
+    fn backup(&self, path: &Path, tag: &str) -> Result<BackupSummary>;
+    fn forget(&self, tag: &str, retention: &Retention) -> Result<()>;
+    fn snapshots(&self, tag: Option<&str>) -> Result<Vec<Snapshot>>;
+}
+
+pub fn parse_backup_output(out: &str) -> Result<BackupSummary> {
+    for line in out.lines() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if v.get("message_type").and_then(|m| m.as_str()) == Some("summary") {
+                return serde_json::from_value(v).context("malformed restic summary");
+            }
+        }
+    }
+    bail!("restic backup produced no summary line");
+}
+
+pub fn parse_snapshots(out: &str) -> Result<Vec<Snapshot>> {
+    serde_json::from_str(out).context("malformed restic snapshots output")
+}
+
+pub fn forget_args(tag: &str, r: &Retention) -> Vec<String> {
+    vec![
+        "forget".into(),
+        "--tag".into(),
+        tag.into(),
+        "--keep-daily".into(),
+        r.daily.to_string(),
+        "--keep-weekly".into(),
+        r.weekly.to_string(),
+        "--keep-monthly".into(),
+        r.monthly.to_string(),
+        "--json".into(),
+    ]
+}
+
+pub struct ResticCli {
+    repo: String,
+    password: String,
+    bin: String,
+}
+
+impl ResticCli {
+    pub fn new(repo: String, password: String) -> Self {
+        Self {
+            repo,
+            password,
+            bin: "restic".into(),
+        }
+    }
+
+    fn run(&self, args: &[String]) -> Result<String> {
+        let out = Command::new(&self.bin)
+            .arg("-r")
+            .arg(&self.repo)
+            .args(args)
+            .env("RESTIC_PASSWORD", &self.password)
+            .output()
+            .with_context(|| format!("failed to spawn {}", self.bin))?;
+        if !out.status.success() {
+            bail!(
+                "restic {} failed: {}",
+                args.first().map(String::as_str).unwrap_or(""),
+                String::from_utf8_lossy(&out.stderr)
+                    .chars()
+                    .take(2000)
+                    .collect::<String>()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+impl Repo for ResticCli {
+    fn ensure_init(&self) -> Result<()> {
+        let probe = self.run(&["cat".into(), "config".into()]);
+        if probe.is_ok() {
+            return Ok(());
+        }
+        self.run(&["init".into()]).map(|_| ())
+    }
+
+    fn backup(&self, path: &Path, tag: &str) -> Result<BackupSummary> {
+        let out = self.run(&[
+            "backup".into(),
+            path.display().to_string(),
+            "--tag".into(),
+            tag.into(),
+            "--json".into(),
+        ])?;
+        parse_backup_output(&out)
+    }
+
+    fn forget(&self, tag: &str, retention: &Retention) -> Result<()> {
+        self.run(&forget_args(tag, retention)).map(|_| ())
+    }
+
+    fn snapshots(&self, tag: Option<&str>) -> Result<Vec<Snapshot>> {
+        let mut args = vec!["snapshots".into(), "--json".into()];
+        if let Some(t) = tag {
+            args.push("--tag".into());
+            args.push(t.into());
+        }
+        parse_snapshots(&self.run(&args)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Retention;
+
+    #[test]
+    fn parses_backup_summary_line() {
+        let out = concat!(
+            r#"{"message_type":"status","percent_done":1}"#,
+            "\n",
+            r#"{"message_type":"summary","snapshot_id":"a1b2c3","total_bytes_processed":52428800}"#,
+            "\n"
+        );
+        let s = parse_backup_output(out).unwrap();
+        assert_eq!(s.snapshot_id, "a1b2c3");
+        assert_eq!(s.total_bytes_processed, 52428800);
+    }
+
+    #[test]
+    fn missing_summary_is_error() {
+        assert!(parse_backup_output(r#"{"message_type":"status"}"#).is_err());
+    }
+
+    #[test]
+    fn parses_snapshot_list() {
+        let out = r#"[{"id":"deadbeef","time":"2026-07-13T02:00:00Z","tags":["source=acme-db"]}]"#;
+        let v = parse_snapshots(out).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].id, "deadbeef");
+        assert_eq!(v[0].tags, vec!["source=acme-db"]);
+    }
+
+    #[test]
+    fn forget_args_map_retention() {
+        let r = Retention {
+            daily: 7,
+            weekly: 4,
+            monthly: 6,
+        };
+        assert_eq!(
+            forget_args("source=acme-db", &r),
+            vec![
+                "forget",
+                "--tag",
+                "source=acme-db",
+                "--keep-daily",
+                "7",
+                "--keep-weekly",
+                "4",
+                "--keep-monthly",
+                "6",
+                "--json"
+            ]
+        );
+    }
+}
