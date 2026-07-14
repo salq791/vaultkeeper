@@ -1,5 +1,6 @@
 pub mod mongodb;
 pub mod postgres;
+pub mod supabase_storage;
 
 use anyhow::{bail, Result};
 use std::collections::HashMap;
