@@ -146,9 +146,14 @@ impl SourceForm {
             serde_json::from_str(settings_raw).context("invalid settings JSON")?
         };
 
+        // One blankness predicate shared by keep_secrets AND the map branch:
+        // if these ever diverge (e.g. is_empty vs trim().is_empty()), a
+        // whitespace-only secrets field on edit reseals an empty map over
+        // the stored credentials, silently destroying them.
         let secrets_raw = self.fields[8].1.value();
-        let keep_secrets = self.editing.is_some() && secrets_raw.is_empty();
-        let secrets: std::collections::HashMap<String, String> = if secrets_raw.trim().is_empty() {
+        let secrets_blank = secrets_raw.trim().is_empty();
+        let keep_secrets = self.editing.is_some() && secrets_blank;
+        let secrets: std::collections::HashMap<String, String> = if secrets_blank {
             std::collections::HashMap::new()
         } else {
             serde_json::from_str(secrets_raw).context("invalid secrets JSON")?
@@ -170,8 +175,11 @@ impl SourceForm {
         ))
     }
 
+    /// Whitespace-only means "unset", same blankness rule as the secrets
+    /// field above, so an accidental space never turns an optional field
+    /// into `Some("  ")` junk.
     fn non_empty(s: &str) -> Option<String> {
-        if s.is_empty() {
+        if s.trim().is_empty() {
             None
         } else {
             Some(s.to_string())
@@ -666,6 +674,36 @@ pub(crate) mod tests {
         let (draft, keep) = form.validate().unwrap();
         assert!(!keep);
         assert_eq!(draft.secrets.get("password").unwrap(), "new");
+    }
+
+    // Review fix: keep_secrets and the map-building branch must share ONE
+    // blankness predicate. A whitespace-only secrets field on edit used to
+    // fail `is_empty()` (keep_secrets = false) while passing
+    // `trim().is_empty()` (empty map), silently resealing an empty map over
+    // the stored credentials.
+    #[test]
+    fn whitespace_only_secrets_on_edit_keeps_blob() {
+        let mut form = SourceForm::new_edit(&meta("a-db"));
+        form.fields[8].1.set("   ");
+        let (draft, keep) = form.validate().unwrap();
+        assert!(
+            keep,
+            "whitespace-only secrets on edit must keep the stored blob"
+        );
+        assert!(draft.secrets.is_empty());
+    }
+
+    // Same inconsistency class for the optional fields: whitespace-only
+    // must mean "unset" (None), not a Some("  ") that then fails cron
+    // validation (verify_schedule) or lands as junk (healthchecks uuids).
+    #[test]
+    fn whitespace_only_optional_fields_become_none() {
+        let mut form = SourceForm::new_edit(&meta("a-db"));
+        form.fields[3].1.set("  ");
+        form.fields[5].1.set("  ");
+        let (draft, _) = form.validate().unwrap();
+        assert!(draft.verify_schedule.is_none());
+        assert!(draft.healthchecks_uuid.is_none());
     }
 
     #[test]
