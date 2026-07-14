@@ -21,5 +21,6 @@ Initial release: a self-hosted backup orchestrator for Supabase, PostgreSQL, and
 - A terminal UI (ratatui) covering the full operational loop: a dashboard of sources and their last/next run, run history with detail, source management (add/edit/enable/disable) with masked credential entry, snapshot browsing, and a guided restore flow with typed confirmation.
 - A `check-config` command that validates configuration, the sources database, required external tools (restic, pg_dump, mongodump, rclone, supabase CLI), and notification/verify wiring, exiting nonzero on any problem.
 - A single Docker image (`ghcr.io/salq791/vaultkeeper`, linux/amd64) bundling all required tools, published via CI, with a `docker-compose.yml` that includes an opt-in `verify` profile for the scratch databases used by scheduled verification.
+- The daemon now idles instead of exiting when no sources are configured, so a fresh container stays up until you add the first source.
 
 [0.1.0]: https://github.com/salq791/vaultkeeper/releases/tag/v0.1.0

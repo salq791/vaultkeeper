@@ -38,10 +38,13 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
         .map(|s| (s.name, s.schedule, s.verify_schedule))
         .collect();
     drop(st);
-    anyhow::ensure!(
-        !sources.is_empty(),
-        "no enabled sources; add one with 'vaultkeeper source add'"
-    );
+    if sources.is_empty() {
+        tracing::warn!(
+            "no enabled sources configured; the daemon is idle. Add a source, then restart the container (docker compose restart vaultkeeper) to schedule it"
+        );
+        shutdown_signal().await;
+        return Ok(());
+    }
     for (name, schedule, verify_schedule) in &sources {
         schedule::validate(schedule).with_context(|| format!("source {name}"))?;
         if let Some(vs) = verify_schedule {

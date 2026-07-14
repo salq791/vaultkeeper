@@ -46,8 +46,9 @@ Prebuilt image: `ghcr.io/salq791/vaultkeeper:latest` (linux/amd64).
       --settings-json '{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}' \
       --secrets-json -
 
-4. Scheduled restore verification needs the scratch databases. Set VERIFY_PG_PASSWORD in .env, then: `docker compose --profile verify up -d`, then add `--verify-schedule "0 5 * * 0"` to your sources.
-5. `docker compose exec vaultkeeper vaultkeeper check-config` exits nonzero if anything is misconfigured.
+4. Restart the container so the daemon schedules the new source: `docker compose exec` adds it, then `docker compose restart vaultkeeper`.
+5. Scheduled restore verification needs the scratch databases. Set VERIFY_PG_PASSWORD in .env, then: `docker compose --profile verify up -d`, then add `--verify-schedule "0 5 * * 0"` to your sources.
+6. `docker compose exec vaultkeeper vaultkeeper check-config` exits nonzero if anything is misconfigured.
 
 Restores: `docker compose exec vaultkeeper vaultkeeper restore --source my-db` (target via the VAULTKEEPER_RESTORE_TARGET environment variable; same-host restores require --force-same-host).
 
@@ -75,6 +76,7 @@ Notes:
 
 - Restores started from the TUI go through the same guards as the CLI: a same-host target is refused, and a storage restore that would overwrite the live bucket is refused. Neither guard has a TUI override; use `vaultkeeper restore --force-same-host` or `--confirm-remote-overwrite` on the CLI for those cases.
 - The add/edit source form enters credentials masked (shown as asterisks while typing) and only ever writes them out as an encrypted blob. The secrets field is write-only: editing a source never re-displays its stored credentials, and leaving it blank keeps the existing ones.
+- Sources added or edited in the TUI take effect on the next daemon restart; `r` ("run now") works immediately regardless.
 
 ## License
 

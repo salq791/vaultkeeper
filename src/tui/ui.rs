@@ -106,9 +106,13 @@ fn render_dashboard(f: &mut Frame, app: &App, area: Rect) {
             let last = latest_run_for(&app.runs, &s.name);
             let last_status = last.map(|r| r.status.as_str()).unwrap_or("-");
             let last_run = last.map(|r| r.started_at.as_str()).unwrap_or("-");
-            let next_run = match crate::schedule::next_occurrence(&s.schedule, Local::now()) {
-                Ok(t) => t.format("%Y-%m-%d %H:%M").to_string(),
-                Err(_) => "?".to_string(),
+            let next_run = if s.enabled {
+                match crate::schedule::next_occurrence(&s.schedule, Local::now()) {
+                    Ok(t) => t.format("%Y-%m-%d %H:%M").to_string(),
+                    Err(_) => "?".to_string(),
+                }
+            } else {
+                "-".to_string()
             };
             Row::new(vec![
                 Cell::from(s.name.clone()),
@@ -562,6 +566,45 @@ mod tests {
         assert!(
             found,
             "expected 'running' status text in the dashboard render"
+        );
+    }
+
+    #[test]
+    fn dashboard_disabled_source_shows_no_next_run() {
+        let year = chrono::Local::now().format("%Y").to_string();
+        let mut enabled_src = crate::tui::state::tests::meta("enabled-src");
+        enabled_src.enabled = true;
+        let mut disabled_src = crate::tui::state::tests::meta("disabled-src");
+        disabled_src.enabled = false;
+
+        let mut app = crate::tui::state::App::new();
+        app.sources = vec![enabled_src, disabled_src];
+        let backend = TestBackend::new(100, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+
+        let mut enabled_row = None;
+        let mut disabled_row = None;
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            if row.contains("enabled-src") {
+                enabled_row = Some(row);
+            } else if row.contains("disabled-src") {
+                disabled_row = Some(row);
+            }
+        }
+
+        let enabled_row = enabled_row.expect("enabled source row present in dashboard");
+        let disabled_row = disabled_row.expect("disabled source row present in dashboard");
+
+        assert!(
+            enabled_row.contains(&year),
+            "enabled source should still show a computed next-run date, got: {enabled_row}"
+        );
+        assert!(
+            disabled_row.contains('-') && !disabled_row.contains(&year),
+            "disabled source should show '-' for next run instead of a date, got: {disabled_row}"
         );
     }
 }
