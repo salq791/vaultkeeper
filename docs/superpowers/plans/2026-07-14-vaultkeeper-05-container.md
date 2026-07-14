@@ -387,7 +387,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && echo "deb [signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg] http://repo.mongodb.org/apt/debian bookworm/mongodb-org/8.0 main" > /etc/apt/sources.list.d/mongodb-org-8.0.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends postgresql-client-18 mongodb-database-tools restic rclone \
-    && curl -fsSL -o /tmp/supabase.deb https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.deb \
+    && curl -fsSL -o /tmp/supabase.deb "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_${SUPABASE_CLI_VERSION}_linux_amd64.deb" \
     && apt-get install -y --no-install-recommends /tmp/supabase.deb \
     && rm -f /tmp/supabase.deb \
     && apt-get purge -y gnupg \
