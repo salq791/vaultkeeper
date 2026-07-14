@@ -93,6 +93,9 @@ impl Engine for SupabaseFunctionsEngine {
     fn verify(&self, ctx: &VerifyCtx) -> Result<String> {
         let payload = crate::util::find_named(&ctx.restored_dir, &ctx.source_name)?;
         let fns_dir = payload.join("supabase").join("functions");
+        // Count only directory entries: each function is a subdirectory, and
+        // stray files alongside them (e.g. import_map.json) must not inflate
+        // the count.
         let count = std::fs::read_dir(&fns_dir)
             .with_context(|| {
                 format!(
@@ -100,6 +103,8 @@ impl Engine for SupabaseFunctionsEngine {
                     fns_dir.display()
                 )
             })?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
             .count();
         anyhow::ensure!(count > 0, "verify found zero functions");
         anyhow::ensure!(
@@ -157,5 +162,36 @@ mod tests {
         let detail = SupabaseFunctionsEngine.verify(&ctx).unwrap();
         assert!(detail.contains("functions=1"));
         assert!(detail.contains("auth_config=present"));
+    }
+
+    #[test]
+    fn verify_ignores_stray_files_when_counting_functions() {
+        let d = tempfile::tempdir().unwrap();
+        let payload = d.path().join("acme-fns");
+        std::fs::create_dir_all(payload.join("supabase").join("functions").join("hello")).unwrap();
+        // A stray file alongside the function directories (e.g. import_map.json)
+        // must not inflate the function count.
+        std::fs::write(
+            payload
+                .join("supabase")
+                .join("functions")
+                .join("import_map.json"),
+            b"{}",
+        )
+        .unwrap();
+        std::fs::write(payload.join("auth-config.json"), b"{}").unwrap();
+        let ctx = super::super::VerifyCtx {
+            restored_dir: d.path().to_path_buf(),
+            source_name: "acme-fns".into(),
+            scratch_postgres: None,
+            scratch_mongodb: None,
+            settings: serde_json::json!({}),
+            secrets: std::collections::HashMap::new(),
+        };
+        let detail = SupabaseFunctionsEngine.verify(&ctx).unwrap();
+        assert!(
+            detail.contains("functions=1"),
+            "stray file must not be counted as a function: {detail}"
+        );
     }
 }

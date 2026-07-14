@@ -23,8 +23,7 @@ pub trait Repo {
     fn backup(&self, path: &Path, tag: &str) -> Result<BackupSummary>;
     fn forget(&self, tag: &str, retention: &Retention) -> Result<()>;
     fn snapshots(&self, tag: Option<&str>) -> Result<Vec<Snapshot>>;
-    #[allow(dead_code)]
-    fn restore(&self, snapshot_id: &str, dest: &Path) -> Result<()>; // Consumed by Task 6: verify flow
+    fn restore(&self, snapshot_id: &str, dest: &Path) -> Result<()>;
 }
 
 pub fn parse_backup_output(out: &str) -> Result<BackupSummary> {
@@ -57,9 +56,7 @@ pub fn forget_args(tag: &str, r: &Retention) -> Vec<String> {
     ]
 }
 
-#[allow(dead_code)]
 pub fn latest_snapshot(repo: &dyn Repo, tag: &str) -> Result<Snapshot> {
-    // Consumed by Task 6: verify flow
     let mut snaps = repo.snapshots(Some(tag))?;
     snaps.sort_by_key(|s| {
         chrono::DateTime::parse_from_rfc3339(&s.time)

@@ -18,6 +18,7 @@ pub fn find_named(root: &std::path::Path, name: &str) -> anyhow::Result<std::pat
 }
 
 /// Recursively count files and total bytes under `root`.
+/// Symlinks are not followed and are not counted as files or directories.
 pub fn dir_stats(root: &std::path::Path) -> anyhow::Result<(u64, u64)> {
     let mut files = 0u64;
     let mut bytes = 0u64;

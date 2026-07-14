@@ -44,6 +44,24 @@ enum Command {
     CheckConfig,
     /// Run the scheduler daemon
     Daemon,
+    /// Restore a snapshot into a target database
+    Restore {
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        snapshot: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        force_same_host: bool,
+        #[arg(long)]
+        confirm_remote_overwrite: bool,
+    },
+    /// Restore the latest snapshot into scratch databases and check it
+    Verify {
+        #[arg(long)]
+        source: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -277,6 +295,39 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()?;
             rt.block_on(scheduler::run_daemon(cfg, db_path()))
+        }
+        Command::Restore {
+            source,
+            snapshot,
+            target,
+            force_same_host,
+            confirm_remote_overwrite,
+        } => {
+            let cfg = config::load(&config_path())?;
+            exec::execute_restore(
+                &cfg,
+                &db_path(),
+                &source,
+                snapshot.as_deref(),
+                target.as_deref(),
+                force_same_host,
+                confirm_remote_overwrite,
+            )?;
+            println!("restore of {source} complete");
+            Ok(())
+        }
+        Command::Verify { source } => {
+            let cfg = config::load(&config_path())?;
+            let out = exec::execute_verify(&cfg, &db_path(), &source)?;
+            let detail = open_store()
+                .and_then(|st| st.run_detail(out.run_id))
+                .ok()
+                .flatten();
+            match detail {
+                Some(d) => println!("verify of {source}: {} ({d})", out.status),
+                None => println!("verify of {source}: {}", out.status),
+            }
+            Ok(())
         }
     }
 }

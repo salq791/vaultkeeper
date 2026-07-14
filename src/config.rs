@@ -7,8 +7,6 @@ pub struct Config {
     pub global: Global,
     #[serde(default)]
     pub notify: Notify,
-    #[allow(dead_code)]
-    // Consumed by Task 6: verify command reads this to find scratch targets.
     #[serde(default)]
     pub verify: VerifyCfg,
 }
@@ -37,9 +35,7 @@ pub struct Ses {
 }
 
 /// Scratch-database targets used by `vaultkeeper verify` to restore-and-check
-/// a backup without touching production. Unused until Task 6 wires up the
-/// verify command.
-#[allow(dead_code)]
+/// a backup without touching production.
 #[derive(Debug, Default, Deserialize)]
 pub struct VerifyCfg {
     pub postgres_url: Option<String>,

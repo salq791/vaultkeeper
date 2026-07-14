@@ -41,9 +41,13 @@ pub struct VerifyCtx {
     pub scratch_mongodb: Option<String>,
     pub settings: serde_json::Value,
     #[allow(dead_code)]
-    // No current verify implementation needs source secrets (scratch
-    // credentials live in scratch_postgres/scratch_mongodb instead); kept
-    // for parity with RestoreCtx and future engines that may need them.
+    // Still unread after Task 6's CLI/exec wiring: execute_verify populates
+    // this from source.secrets, but no verify() implementation reads it back
+    // (scratch credentials live in scratch_postgres/scratch_mongodb
+    // instead). Kept for parity with RestoreCtx and future engines that may
+    // need source secrets during verify. Verified empirically: removing this
+    // allow makes `cargo clippy -D warnings` fail with "field `secrets` is
+    // never read".
     pub secrets: HashMap<String, String>,
 }
 
@@ -51,13 +55,9 @@ pub trait Engine {
     /// Produce the backup payload; return the directory restic should snapshot.
     fn dump(&self, ctx: &DumpCtx) -> Result<PathBuf>;
     /// Restore a previously-dumped payload back to a live target.
-    #[allow(dead_code)]
-    // Consumed by Task 6: CLI restore wiring.
     fn restore(&self, ctx: &RestoreCtx) -> Result<()>;
     /// Restore into a scratch target and assert basic sanity; returns a
     /// metrics line journaled as detail on success.
-    #[allow(dead_code)]
-    // Consumed by Task 6: CLI/scheduled verify wiring.
     fn verify(&self, ctx: &VerifyCtx) -> Result<String>;
 }
 

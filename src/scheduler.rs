@@ -27,13 +27,7 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
         sources.len()
     );
 
-    let mut repo = crate::restic::ResticCli::new(
-        cfg.global.restic_repo.clone(),
-        cfg.global.restic_password.clone(),
-    );
-    if let Some(mins) = cfg.global.restic_timeout_minutes {
-        repo = repo.with_timeout(std::time::Duration::from_secs(mins.saturating_mul(60)));
-    }
+    let repo = exec::build_repo(&cfg);
     {
         use crate::restic::Repo as _;
         repo.ensure_init()
