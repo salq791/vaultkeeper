@@ -706,7 +706,20 @@ impl Engine for SupabaseFunctionsEngine {
             bail!("auth config request returned HTTP {}", resp.status());
         }
         let body = resp.bytes().context("failed to read auth config body")?;
-        std::fs::write(ctx.staging_dir.join("auth-config.json"), &body)?;
+        {
+            use std::io::Write;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut f = opts
+                .open(ctx.staging_dir.join("auth-config.json"))
+                .context("failed to create auth config file")?;
+            f.write_all(&body)?;
+        }
         Ok(ctx.staging_dir.clone())
     }
 }
