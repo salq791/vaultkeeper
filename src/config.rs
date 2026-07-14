@@ -7,6 +7,10 @@ pub struct Config {
     pub global: Global,
     #[serde(default)]
     pub notify: Notify,
+    #[allow(dead_code)]
+    // Consumed by Task 6: verify command reads this to find scratch targets.
+    #[serde(default)]
+    pub verify: VerifyCfg,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +34,16 @@ pub struct Ses {
     pub region: String,
     pub from: String,
     pub to: Vec<String>,
+}
+
+/// Scratch-database targets used by `vaultkeeper verify` to restore-and-check
+/// a backup without touching production. Unused until Task 6 wires up the
+/// verify command.
+#[allow(dead_code)]
+#[derive(Debug, Default, Deserialize)]
+pub struct VerifyCfg {
+    pub postgres_url: Option<String>,
+    pub mongodb_uri: Option<String>,
 }
 
 /// Replace every ${NAME} with lookup(NAME); error naming the var when absent.
@@ -75,6 +89,9 @@ restic_timeout_minutes = 300
 
 [notify]
 healthchecks_base = "https://hc-ping.com"
+
+[verify]
+postgres_url = "postgres://v:v@scratch.example.com:5432/scratch"
 "#;
 
     const SAMPLE_MINIMAL: &str = r#"
@@ -102,6 +119,17 @@ restic_password = "${RESTIC_PASSWORD}"
             Some("https://hc-ping.com")
         );
         assert!(cfg.notify.ses.is_none());
+        assert_eq!(
+            cfg.verify.postgres_url.as_deref(),
+            Some("postgres://v:v@scratch.example.com:5432/scratch")
+        );
+    }
+
+    #[test]
+    fn verify_defaults_when_absent() {
+        let cfg = load_from_str(SAMPLE_MINIMAL, &lookup).unwrap();
+        assert!(cfg.verify.postgres_url.is_none());
+        assert!(cfg.verify.mongodb_uri.is_none());
     }
 
     #[test]

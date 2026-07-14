@@ -30,6 +30,23 @@ pub struct RestoreCtx {
     pub secrets: HashMap<String, String>,
 }
 
+// No Debug derive: scratch_postgres/scratch_mongodb carry scratch-database
+// credentials embedded in the URL, and secrets carries restore-target
+// credentials; a Debug impl would let any future {:?} or dbg!() leak them
+// into logs.
+pub struct VerifyCtx {
+    pub restored_dir: PathBuf,
+    pub source_name: String,
+    pub scratch_postgres: Option<String>,
+    pub scratch_mongodb: Option<String>,
+    pub settings: serde_json::Value,
+    #[allow(dead_code)]
+    // No current verify implementation needs source secrets (scratch
+    // credentials live in scratch_postgres/scratch_mongodb instead); kept
+    // for parity with RestoreCtx and future engines that may need them.
+    pub secrets: HashMap<String, String>,
+}
+
 pub trait Engine {
     /// Produce the backup payload; return the directory restic should snapshot.
     fn dump(&self, ctx: &DumpCtx) -> Result<PathBuf>;
@@ -37,6 +54,11 @@ pub trait Engine {
     #[allow(dead_code)]
     // Consumed by Task 6: CLI restore wiring.
     fn restore(&self, ctx: &RestoreCtx) -> Result<()>;
+    /// Restore into a scratch target and assert basic sanity; returns a
+    /// metrics line journaled as detail on success.
+    #[allow(dead_code)]
+    // Consumed by Task 6: CLI/scheduled verify wiring.
+    fn verify(&self, ctx: &VerifyCtx) -> Result<String>;
 }
 
 pub fn engine_for(kind: &str) -> Result<Box<dyn Engine>> {

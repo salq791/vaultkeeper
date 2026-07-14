@@ -1,4 +1,4 @@
-use super::{DumpCtx, Engine, RestoreCtx};
+use super::{DumpCtx, Engine, RestoreCtx, VerifyCtx};
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
@@ -89,6 +89,25 @@ impl Engine for SupabaseFunctionsEngine {
         println!("  3. auth-config.json in the same directory is a reference for manual settings re-entry");
         Ok(())
     }
+
+    fn verify(&self, ctx: &VerifyCtx) -> Result<String> {
+        let payload = crate::util::find_named(&ctx.restored_dir, &ctx.source_name)?;
+        let fns_dir = payload.join("supabase").join("functions");
+        let count = std::fs::read_dir(&fns_dir)
+            .with_context(|| {
+                format!(
+                    "no functions directory in restored snapshot at {}",
+                    fns_dir.display()
+                )
+            })?
+            .count();
+        anyhow::ensure!(count > 0, "verify found zero functions");
+        anyhow::ensure!(
+            payload.join("auth-config.json").exists(),
+            "auth-config.json missing from snapshot"
+        );
+        Ok(format!("functions={count} auth_config=present"))
+    }
 }
 
 #[cfg(test)]
@@ -119,5 +138,24 @@ mod tests {
             auth_config_url("https://api.supabase.com/", "ref123"),
             "https://api.supabase.com/v1/projects/ref123/config/auth"
         );
+    }
+
+    #[test]
+    fn verify_checks_functions_and_auth_config() {
+        let d = tempfile::tempdir().unwrap();
+        let payload = d.path().join("acme-fns");
+        std::fs::create_dir_all(payload.join("supabase").join("functions").join("hello")).unwrap();
+        std::fs::write(payload.join("auth-config.json"), b"{}").unwrap();
+        let ctx = super::super::VerifyCtx {
+            restored_dir: d.path().to_path_buf(),
+            source_name: "acme-fns".into(),
+            scratch_postgres: None,
+            scratch_mongodb: None,
+            settings: serde_json::json!({}),
+            secrets: std::collections::HashMap::new(),
+        };
+        let detail = SupabaseFunctionsEngine.verify(&ctx).unwrap();
+        assert!(detail.contains("functions=1"));
+        assert!(detail.contains("auth_config=present"));
     }
 }

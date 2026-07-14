@@ -1,4 +1,4 @@
-use super::{DumpCtx, Engine, RestoreCtx};
+use super::{DumpCtx, Engine, RestoreCtx, VerifyCtx};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,8 +10,7 @@ pub struct PostgresEngine;
 /// pg_restore_invocation; factored out per clippy::type_complexity.
 type PgInvocation = (Vec<String>, Vec<(String, String)>);
 
-/// Naive host extraction for same-host comparison (text between the scheme's
-/// '@' and the next ':' or '/' or end); delegates to full URL parsing.
+/// Host extraction for same-host comparison, via url::Url::parse.
 pub fn url_host(url: &str) -> Option<String> {
     url::Url::parse(url).ok()?.host_str().map(|h| h.to_string())
 }
@@ -138,6 +137,63 @@ impl Engine for PostgresEngine {
         }
         Ok(())
     }
+
+    fn verify(&self, ctx: &VerifyCtx) -> Result<String> {
+        let scratch = ctx
+            .scratch_postgres
+            .as_deref()
+            .context("postgres verify needs a scratch database: configure [verify] postgres_url")?;
+        let payload = crate::util::find_named(&ctx.restored_dir, &ctx.source_name)?;
+        let (argv, env) = pg_restore_invocation(scratch, &payload.join("db.dump"))?;
+        let mut cmd = Command::new("pg_restore");
+        cmd.args(&argv)
+            .envs(env.clone())
+            .env_remove("VAULTKEEPER_MASTER_KEY")
+            .env_remove("RESTIC_PASSWORD");
+        let out = crate::util::output_with_timeout(
+            &mut cmd,
+            super::timeout_from_settings(&ctx.settings),
+        )?;
+        if !out.status.success() {
+            bail!(
+                "verify pg_restore failed: {}",
+                crate::util::truncate_marked(&String::from_utf8_lossy(&out.stderr), 2000)
+            );
+        }
+        let psql = |sql: &str| -> Result<String> {
+            let u = url::Url::parse(scratch)?;
+            let mut cmd = Command::new("psql");
+            cmd.args([
+                "-Atc".to_string(),
+                sql.to_string(),
+                "-h".to_string(),
+                u.host_str().unwrap_or_default().to_string(),
+                "-p".to_string(),
+                u.port().unwrap_or(5432).to_string(),
+                "-U".to_string(),
+                u.username().to_string(),
+                "-d".to_string(),
+                u.path().trim_start_matches('/').to_string(),
+            ])
+            .envs(env.clone())
+            .env_remove("VAULTKEEPER_MASTER_KEY")
+            .env_remove("RESTIC_PASSWORD");
+            let out = crate::util::output_with_timeout(
+                &mut cmd,
+                super::timeout_from_settings(&ctx.settings),
+            )?;
+            anyhow::ensure!(out.status.success(), "psql query failed");
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        psql("ANALYZE")?;
+        let tables: i64 =
+            psql("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")?
+                .parse()?;
+        let rows: i64 =
+            psql("SELECT coalesce(sum(n_live_tup),0)::bigint FROM pg_stat_user_tables")?.parse()?;
+        anyhow::ensure!(tables > 0, "verify restored zero tables");
+        Ok(format!("tables={tables} approx_rows={rows}"))
+    }
 }
 
 #[cfg(test)]
@@ -230,5 +286,19 @@ mod tests {
         };
         let err = PostgresEngine.restore(&ctx).unwrap_err();
         assert!(err.to_string().contains("force-same-host"));
+    }
+
+    #[test]
+    fn verify_requires_scratch_postgres() {
+        let ctx = super::super::VerifyCtx {
+            restored_dir: std::path::PathBuf::from("/nonexistent"),
+            source_name: "acme-db".into(),
+            scratch_postgres: None,
+            scratch_mongodb: None,
+            settings: serde_json::json!({}),
+            secrets: HashMap::new(),
+        };
+        let err = PostgresEngine.verify(&ctx).unwrap_err();
+        assert!(err.to_string().contains("[verify]"));
     }
 }

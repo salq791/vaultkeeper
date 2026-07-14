@@ -98,7 +98,7 @@ pub fn run_backup(
 mod tests {
     use super::*;
     use crate::crypto::MasterKey;
-    use crate::engines::{DumpCtx, Engine, RestoreCtx};
+    use crate::engines::{DumpCtx, Engine, RestoreCtx, VerifyCtx};
     use crate::restic::{BackupSummary, Repo, Snapshot};
     use crate::store::{NewSource, Store};
     use crate::types::Retention;
@@ -115,8 +115,11 @@ mod tests {
             std::fs::write(ctx.staging_dir.join("db.dump"), b"data")?;
             Ok(ctx.staging_dir.clone())
         }
-        // Pipeline test double: dump-only, restore is never exercised here.
+        // Pipeline test double: dump-only, restore/verify are never exercised here.
         fn restore(&self, _ctx: &RestoreCtx) -> Result<()> {
+            unreachable!()
+        }
+        fn verify(&self, _ctx: &VerifyCtx) -> Result<String> {
             unreachable!()
         }
     }
@@ -126,8 +129,11 @@ mod tests {
         fn dump(&self, _ctx: &DumpCtx) -> Result<std::path::PathBuf> {
             bail!("connection refused");
         }
-        // Pipeline test double: dump-only, restore is never exercised here.
+        // Pipeline test double: dump-only, restore/verify are never exercised here.
         fn restore(&self, _ctx: &RestoreCtx) -> Result<()> {
+            unreachable!()
+        }
+        fn verify(&self, _ctx: &VerifyCtx) -> Result<String> {
             unreachable!()
         }
     }
@@ -138,8 +144,11 @@ mod tests {
             std::fs::write(ctx.mirror_root.join("obj1"), b"filedata")?;
             Ok(ctx.mirror_root.clone())
         }
-        // Pipeline test double: dump-only, restore is never exercised here.
+        // Pipeline test double: dump-only, restore/verify are never exercised here.
         fn restore(&self, _ctx: &RestoreCtx) -> Result<()> {
+            unreachable!()
+        }
+        fn verify(&self, _ctx: &VerifyCtx) -> Result<String> {
             unreachable!()
         }
     }
@@ -224,8 +233,11 @@ mod tests {
             conn.execute_batch("DROP TABLE runs;").unwrap();
             anyhow::bail!("connection refused")
         }
-        // Pipeline test double: dump-only, restore is never exercised here.
+        // Pipeline test double: dump-only, restore/verify are never exercised here.
         fn restore(&self, _ctx: &RestoreCtx) -> Result<()> {
+            unreachable!()
+        }
+        fn verify(&self, _ctx: &VerifyCtx) -> Result<String> {
             unreachable!()
         }
     }

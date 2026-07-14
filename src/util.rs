@@ -17,6 +17,26 @@ pub fn find_named(root: &std::path::Path, name: &str) -> anyhow::Result<std::pat
     anyhow::bail!("could not find '{name}' under {}", root.display())
 }
 
+/// Recursively count files and total bytes under `root`.
+pub fn dir_stats(root: &std::path::Path) -> anyhow::Result<(u64, u64)> {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                files += 1;
+                bytes += entry.metadata()?.len();
+            }
+        }
+    }
+    Ok((files, bytes))
+}
+
 pub fn truncate_marked(s: &str, max_chars: usize) -> String {
     let mut out: String = s.chars().take(max_chars).collect();
     if s.chars().count() > max_chars {
@@ -191,6 +211,15 @@ mod tests {
         .unwrap();
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("oops"));
+    }
+
+    #[test]
+    fn dir_stats_counts_files_and_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("sub")).unwrap();
+        std::fs::write(d.path().join("a.bin"), b"12345").unwrap();
+        std::fs::write(d.path().join("sub").join("b.bin"), b"123").unwrap();
+        assert_eq!(dir_stats(d.path()).unwrap(), (2, 8));
     }
 
     #[test]

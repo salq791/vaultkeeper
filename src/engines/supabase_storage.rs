@@ -1,4 +1,4 @@
-use super::{DumpCtx, Engine, RestoreCtx};
+use super::{DumpCtx, Engine, RestoreCtx, VerifyCtx};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -103,6 +103,13 @@ impl Engine for SupabaseStorageEngine {
         }
         Ok(())
     }
+
+    fn verify(&self, ctx: &VerifyCtx) -> Result<String> {
+        let mirror = crate::util::find_named(&ctx.restored_dir, &ctx.source_name)?;
+        let (files, bytes) = crate::util::dir_stats(&mirror)?;
+        anyhow::ensure!(files > 0, "verify found zero files in the restored mirror");
+        Ok(format!("files={files} bytes={bytes}"))
+    }
 }
 
 #[cfg(test)]
@@ -171,5 +178,25 @@ mod tests {
         };
         let err = SupabaseStorageEngine.restore(&ctx).unwrap_err();
         assert!(err.to_string().contains("confirm-remote-overwrite"));
+    }
+
+    #[test]
+    fn verify_reports_file_stats() {
+        let d = tempfile::tempdir().unwrap();
+        let mirror = d.path().join("acme-storage");
+        std::fs::create_dir_all(&mirror).unwrap();
+        std::fs::write(mirror.join("obj1"), b"abcd").unwrap();
+        let ctx = super::super::VerifyCtx {
+            restored_dir: d.path().to_path_buf(),
+            source_name: "acme-storage".into(),
+            scratch_postgres: None,
+            scratch_mongodb: None,
+            settings: serde_json::json!({}),
+            secrets: std::collections::HashMap::new(),
+        };
+        assert_eq!(
+            SupabaseStorageEngine.verify(&ctx).unwrap(),
+            "files=1 bytes=4"
+        );
     }
 }

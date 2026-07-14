@@ -1,4 +1,4 @@
-use super::{DumpCtx, Engine, RestoreCtx};
+use super::{DumpCtx, Engine, RestoreCtx, VerifyCtx};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -47,6 +47,20 @@ pub fn mongodump_invocation(
         config_path,
         config_contents: format!("uri: {uri}\n"),
     })
+}
+
+/// Parse mongorestore's "N document(s) restored successfully" line and
+/// return N, the restored document count, or None if the marker is absent.
+pub fn parse_restored_docs(out: &str) -> Option<u64> {
+    for line in out.lines() {
+        if let Some(idx) = line.find(" document(s) restored successfully") {
+            let head = &line[..idx];
+            let num = head.rsplit(|c: char| !c.is_ascii_digit()).next()?;
+            let num = head[head.len() - num.len()..].parse().ok()?;
+            return Some(num);
+        }
+    }
+    None
 }
 
 impl Engine for MongodbEngine {
@@ -120,6 +134,48 @@ impl Engine for MongodbEngine {
             );
         }
         Ok(())
+    }
+
+    fn verify(&self, ctx: &VerifyCtx) -> Result<String> {
+        let scratch = ctx
+            .scratch_mongodb
+            .as_deref()
+            .context("mongodb verify needs a scratch database: configure [verify] mongodb_uri")?;
+        let payload = crate::util::find_named(&ctx.restored_dir, &ctx.source_name)?;
+        let config_path = payload.join(".mongorestore-config.yml");
+        crate::util::write_new_0600(&config_path, format!("uri: {scratch}\n").as_bytes())?;
+        let mut cmd = Command::new("mongorestore");
+        cmd.args([
+            "--config".to_string(),
+            config_path.display().to_string(),
+            "--drop".to_string(),
+            "--dir".to_string(),
+            payload.join("dump").display().to_string(),
+        ])
+        .env_remove("VAULTKEEPER_MASTER_KEY")
+        .env_remove("RESTIC_PASSWORD");
+        let out =
+            crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings));
+        let _ = std::fs::remove_file(&config_path);
+        if config_path.exists() {
+            bail!("mongorestore config file could not be removed; aborting so credentials are not left on disk");
+        }
+        let out = out?;
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if !out.status.success() {
+            bail!(
+                "verify mongorestore failed: {}",
+                crate::util::truncate_marked(&combined, 2000)
+            );
+        }
+        let docs =
+            parse_restored_docs(&combined).context("could not parse restored document count")?;
+        anyhow::ensure!(docs > 0, "verify restored zero documents");
+        Ok(format!("docs={docs}"))
     }
 }
 
@@ -217,5 +273,26 @@ mod tests {
         };
         let err = MongodbEngine.restore(&ctx).unwrap_err();
         assert!(err.to_string().contains("force-same-host"));
+    }
+
+    #[test]
+    fn parses_mongorestore_doc_count() {
+        let out = "2026-07-14T02:00:01.000+0000\t55 document(s) restored successfully. 0 document(s) failed to restore.";
+        assert_eq!(parse_restored_docs(out), Some(55));
+        assert_eq!(parse_restored_docs("no numbers here"), None);
+    }
+
+    #[test]
+    fn verify_requires_scratch_mongodb() {
+        let ctx = super::super::VerifyCtx {
+            restored_dir: std::path::PathBuf::from("/nonexistent"),
+            source_name: "acme-db".into(),
+            scratch_postgres: None,
+            scratch_mongodb: None,
+            settings: serde_json::json!({}),
+            secrets: HashMap::new(),
+        };
+        let err = MongodbEngine.verify(&ctx).unwrap_err();
+        assert!(err.to_string().contains("[verify]"));
     }
 }
