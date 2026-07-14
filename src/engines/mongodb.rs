@@ -70,6 +70,20 @@ pub fn parse_restored_docs(out: &str) -> Option<u64> {
     None
 }
 
+/// Fails restore when mongorestore reports zero restored documents. A silent
+/// zero-document restore reporting success is the worst failure mode for a
+/// backup tool; the most common cause is a target uri that names a database,
+/// which makes `mongorestore --dir <dump root>` skip the dump's per-database
+/// subdirectories.
+fn ensure_docs_restored(combined: &str) -> Result<()> {
+    match parse_restored_docs(combined) {
+        Some(n) if n > 0 => Ok(()),
+        _ => anyhow::bail!(
+            "mongorestore reported zero restored documents; check that the target uri has no database path"
+        ),
+    }
+}
+
 /// Parse mongorestore's "N document(s) failed to restore" line and return N,
 /// or None if the marker is absent.
 pub fn parse_failed_docs(out: &str) -> Option<u64> {
@@ -150,12 +164,18 @@ impl Engine for MongodbEngine {
         }
         let out =
             out.context("failed to spawn mongorestore (is mongodb-database-tools installed?)")?;
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         if !out.status.success() {
             bail!(
                 "mongorestore failed: {}",
-                crate::util::truncate_marked(&String::from_utf8_lossy(&out.stderr), 2000)
+                crate::util::truncate_marked(&combined, 2000)
             );
         }
+        ensure_docs_restored(&combined)?;
         Ok(())
     }
 
@@ -354,6 +374,19 @@ mod tests {
             Some(0)
         );
         assert_eq!(parse_failed_docs("nothing here"), None);
+    }
+
+    #[test]
+    fn restore_fails_on_zero_restored_documents() {
+        let out = "0 document(s) restored successfully. 0 document(s) failed to restore.";
+        let err = ensure_docs_restored(out).unwrap_err();
+        assert!(err.to_string().contains("zero restored documents"));
+    }
+
+    #[test]
+    fn restore_passes_when_documents_restored() {
+        let out = "3 document(s) restored successfully. 0 document(s) failed to restore.";
+        assert!(ensure_docs_restored(out).is_ok());
     }
 
     #[test]

@@ -69,6 +69,11 @@ pub fn pg_restore_invocation(target_url: &str, dump_file: &Path) -> Result<PgInv
     let argv = vec![
         "--clean".into(),
         "--if-exists".into(),
+        // Dumps carry OWNER TO and GRANT statements referencing roles that do
+        // not exist on the target cluster; without these flags pg_restore
+        // exits 1 on cross-cluster restores.
+        "--no-owner".into(),
+        "--no-acl".into(),
         "-h".into(),
         parts.host,
         "-p".into(),
@@ -297,6 +302,8 @@ mod tests {
             vec![
                 "--clean",
                 "--if-exists",
+                "--no-owner",
+                "--no-acl",
                 "-h",
                 "restore.example.com",
                 "-p",
@@ -359,6 +366,8 @@ mod tests {
         assert!(env.contains(&("PGPASSWORD".to_string(), "p@ss/word".to_string())));
         assert!(env.contains(&("PGSSLMODE".to_string(), "require".to_string())));
         assert!(argv.contains(&"newdb".to_string()));
+        assert!(argv.contains(&"--no-owner".to_string()));
+        assert!(argv.contains(&"--no-acl".to_string()));
         assert!(!argv
             .iter()
             .any(|a| a.contains("p%40ss%2Fword") || a.contains("p@ss/word")));
@@ -372,6 +381,8 @@ mod tests {
         )
         .unwrap();
         assert!(argv.contains(&"my-db".to_string()));
+        assert!(argv.contains(&"--no-owner".to_string()));
+        assert!(argv.contains(&"--no-acl".to_string()));
         assert!(!argv.iter().any(|a| a.contains("%2D") || a.contains("%2d")));
     }
 

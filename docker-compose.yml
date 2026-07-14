@@ -18,7 +18,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: verifier
-      POSTGRES_PASSWORD: ${VERIFY_PG_PASSWORD:?set in .env}
+      # empty default keeps 'docker compose up -d' working without the verify profile; the postgres image refuses an empty password when the profile actually starts
+      POSTGRES_PASSWORD: ${VERIFY_PG_PASSWORD:-}
       POSTGRES_DB: scratch
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U verifier -d scratch"]

@@ -31,7 +31,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [test, e2e]
+    needs: [test, e2e, smoke]
     permissions:
       contents: read
       packages: write

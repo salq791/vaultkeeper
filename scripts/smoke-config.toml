@@ -5,4 +5,4 @@ restic_password = "${RESTIC_PASSWORD}"
 
 [verify]
 postgres_url = "postgres://verifier:p%40ss%2Fword@scratch-postgres:5432/scratch?sslmode=disable"
-mongodb_uri = "mongodb://scratch-mongo:27017/scratch"
+mongodb_uri = "mongodb://scratch-mongo:27017"

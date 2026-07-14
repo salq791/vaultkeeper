@@ -17,4 +17,5 @@ healthchecks_base = "https://hc-ping.com"
 [verify]
 # VERIFY_PG_PASSWORD is substituted textually into this URL: use a URL-safe or percent-encoded value.
 postgres_url = "postgres://verifier:${VERIFY_PG_PASSWORD}@verify-postgres:5432/scratch?sslmode=disable"
-mongodb_uri = "mongodb://verify-mongo:27017/scratch"
+# Do not put a database name in this URI: mongorestore restores the dump's own database names.
+mongodb_uri = "mongodb://verify-mongo:27017"

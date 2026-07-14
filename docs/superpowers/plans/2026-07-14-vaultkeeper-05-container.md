@@ -459,7 +459,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: verifier
-      POSTGRES_PASSWORD: ${VERIFY_PG_PASSWORD:?set in .env}
+      # empty default keeps 'docker compose up -d' working without the verify profile; the postgres image refuses an empty password when the profile actually starts
+      POSTGRES_PASSWORD: ${VERIFY_PG_PASSWORD:-}
       POSTGRES_DB: scratch
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U verifier -d scratch"]
@@ -504,7 +505,8 @@ healthchecks_base = "https://hc-ping.com"
 [verify]
 # VERIFY_PG_PASSWORD is substituted textually into this URL: use a URL-safe or percent-encoded value.
 postgres_url = "postgres://verifier:${VERIFY_PG_PASSWORD}@verify-postgres:5432/scratch?sslmode=disable"
-mongodb_uri = "mongodb://verify-mongo:27017/scratch"
+# Do not put a database name in this URI: mongorestore restores the dump's own database names.
+mongodb_uri = "mongodb://verify-mongo:27017"
 ```
 
 `.env.example` gains:
@@ -687,7 +689,7 @@ restic_password = "${RESTIC_PASSWORD}"
 
 [verify]
 postgres_url = "postgres://verifier:p%40ss%2Fword@scratch-postgres:5432/scratch?sslmode=disable"
-mongodb_uri = "mongodb://scratch-mongo:27017/scratch"
+mongodb_uri = "mongodb://scratch-mongo:27017"
 ```
 
 - [ ] **Step 2: Write the smoke script**

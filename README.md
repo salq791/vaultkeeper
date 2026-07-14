@@ -44,7 +44,7 @@ Prebuilt image: `ghcr.io/salq791/vaultkeeper:latest` (linux/amd64).
       --settings-json '{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}' \
       --secrets-json -
 
-4. Scheduled restore verification needs the scratch databases: `docker compose --profile verify up -d`, then add `--verify-schedule "0 5 * * 0"` to your sources.
+4. Scheduled restore verification needs the scratch databases. Set VERIFY_PG_PASSWORD in .env, then: `docker compose --profile verify up -d`, then add `--verify-schedule "0 5 * * 0"` to your sources.
 5. `docker compose exec vaultkeeper vaultkeeper check-config` exits nonzero if anything is misconfigured.
 
 Restores: `docker compose exec vaultkeeper vaultkeeper restore --source my-db` (target via the VAULTKEEPER_RESTORE_TARGET environment variable; same-host restores require --force-same-host).
