@@ -6,8 +6,10 @@ use std::path::Path;
 
 #[derive(Debug)]
 pub struct RunOutcome {
+    #[allow(dead_code)]
     pub run_id: i64,
     pub snapshot_id: Option<String>,
+    #[allow(dead_code)]
     pub status: String,
 }
 
