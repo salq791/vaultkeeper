@@ -47,7 +47,7 @@ pub fn pg_dump_invocation(
 }
 
 impl Engine for PostgresEngine {
-    fn dump(&self, ctx: &DumpCtx) -> Result<()> {
+    fn dump(&self, ctx: &DumpCtx) -> Result<std::path::PathBuf> {
         let out_file = ctx.staging_dir.join("db.dump");
         let (argv, env) = pg_dump_invocation(&ctx.settings, &ctx.secrets, &out_file)?;
         let out = Command::new("pg_dump")
@@ -63,7 +63,7 @@ impl Engine for PostgresEngine {
                 crate::util::truncate_marked(&String::from_utf8_lossy(&out.stderr), 2000)
             );
         }
-        Ok(())
+        Ok(ctx.staging_dir.clone())
     }
 }
 

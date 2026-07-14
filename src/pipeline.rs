@@ -33,14 +33,22 @@ pub fn run_backup(
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&staging_dir, std::fs::Permissions::from_mode(0o700))?;
         }
+        let mirror_root = staging_root.join(".mirrors").join(&source.name);
+        std::fs::create_dir_all(&mirror_root)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mirror_root, std::fs::Permissions::from_mode(0o700))?;
+        }
         let ctx = DumpCtx {
             staging_dir: staging_dir.clone(),
+            mirror_root,
             settings: source.settings.clone(),
             secrets: source.secrets.clone(),
         };
-        engine.dump(&ctx)?;
+        let backup_path = engine.dump(&ctx)?;
         let tag = format!("source={}", source.name);
-        let summary = repo.backup(&staging_dir, &tag)?;
+        let summary = repo.backup(&backup_path, &tag)?;
         repo.forget(&tag, &source.retention)?;
         Ok((summary.snapshot_id, summary.total_bytes_processed))
     })();
@@ -83,16 +91,24 @@ mod tests {
 
     struct OkEngine;
     impl Engine for OkEngine {
-        fn dump(&self, ctx: &DumpCtx) -> Result<()> {
+        fn dump(&self, ctx: &DumpCtx) -> Result<std::path::PathBuf> {
             std::fs::write(ctx.staging_dir.join("db.dump"), b"data")?;
-            Ok(())
+            Ok(ctx.staging_dir.clone())
         }
     }
 
     struct FailEngine;
     impl Engine for FailEngine {
-        fn dump(&self, _ctx: &DumpCtx) -> Result<()> {
+        fn dump(&self, _ctx: &DumpCtx) -> Result<std::path::PathBuf> {
             bail!("connection refused");
+        }
+    }
+
+    struct MirrorEngine;
+    impl Engine for MirrorEngine {
+        fn dump(&self, ctx: &DumpCtx) -> Result<std::path::PathBuf> {
+            std::fs::write(ctx.mirror_root.join("obj1"), b"filedata")?;
+            Ok(ctx.mirror_root.clone())
         }
     }
 
@@ -105,7 +121,10 @@ mod tests {
             Ok(())
         }
         fn backup(&self, _path: &Path, tag: &str) -> Result<BackupSummary> {
-            self.calls.borrow_mut().push(format!("backup:{tag}"));
+            self.calls.borrow_mut().push(format!(
+                "backup:{tag}:{}",
+                _path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+            ));
             Ok(BackupSummary {
                 snapshot_id: "snap1".into(),
                 total_bytes_processed: 4,
@@ -150,12 +169,29 @@ mod tests {
         assert_eq!(out.snapshot_id.as_deref(), Some("snap1"));
         assert_eq!(
             *repo.calls.borrow(),
-            vec!["backup:source=acme-db", "forget:source=acme-db"]
+            vec!["backup:source=acme-db:acme-db", "forget:source=acme-db"]
         );
         assert!(!staging.path().join("acme-db").exists(), "staging cleaned");
         let runs = st.recent_runs(1).unwrap();
         assert_eq!(runs[0].status, "success");
         assert_eq!(runs[0].bytes, Some(4));
+    }
+
+    #[test]
+    fn mirror_engine_backs_up_mirror_and_it_survives() {
+        let (st, src, staging) = setup();
+        let repo = MockRepo::default();
+        let out = run_backup(&st, &repo, &src, staging.path(), &MirrorEngine).unwrap();
+        assert_eq!(out.status, "success");
+        let mirror = staging.path().join(".mirrors").join("acme-db");
+        assert!(
+            mirror.join("obj1").exists(),
+            "mirror persists after the run"
+        );
+        assert!(
+            !staging.path().join("acme-db").exists(),
+            "staging still cleaned"
+        );
     }
 
     #[test]
