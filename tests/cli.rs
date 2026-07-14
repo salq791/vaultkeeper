@@ -185,6 +185,63 @@ fn source_disable_then_list_shows_disabled() {
 }
 
 #[test]
+fn source_add_accepts_verify_schedule_and_validates_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("vk.db");
+
+    let add = bin()
+        .env("VAULTKEEPER_MASTER_KEY", K)
+        .env("VAULTKEEPER_DB", &db)
+        .args([
+            "source",
+            "add",
+            "--name",
+            "acme-db",
+            "--engine",
+            "postgres",
+            "--schedule",
+            "0 2 * * *",
+            "--verify-schedule",
+            "0 5 * * 0",
+            "--settings-json",
+            r#"{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}"#,
+            "--secrets-json",
+            r#"{"password":"pw"}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let bad = bin()
+        .env("VAULTKEEPER_MASTER_KEY", K)
+        .env("VAULTKEEPER_DB", &db)
+        .args([
+            "source",
+            "add",
+            "--name",
+            "other-db",
+            "--engine",
+            "postgres",
+            "--schedule",
+            "0 2 * * *",
+            "--verify-schedule",
+            "banana",
+            "--settings-json",
+            r#"{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}"#,
+            "--secrets-json",
+            r#"{"password":"pw"}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("banana"));
+}
+
+#[test]
 fn check_config_reports_notify_channels() {
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.toml");

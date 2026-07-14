@@ -100,7 +100,10 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
                 let next = match schedule::next_occurrence(&schedule_expr, Local::now()) {
                     Ok(n) => n,
                     Err(e) => {
-                        tracing::error!("{}: schedule error, stopping this source: {e:#}", name);
+                        tracing::error!(
+                            "{}: schedule error, stopping this verify job: {e:#}",
+                            name
+                        );
                         return;
                     }
                 };

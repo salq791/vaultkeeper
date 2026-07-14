@@ -73,6 +73,9 @@ enum SourceCmd {
         engine: String,
         #[arg(long)]
         schedule: String,
+        /// Cron schedule for scheduled restore verification; omit to leave verification unscheduled
+        #[arg(long)]
+        verify_schedule: Option<String>,
         #[arg(long)]
         settings_json: String,
         /// JSON object of secret values, or '-' to read the JSON from stdin (recommended; keeps secrets out of argv and shell history)
@@ -159,6 +162,7 @@ fn main() -> Result<()> {
                 name,
                 engine,
                 schedule,
+                verify_schedule,
                 settings_json,
                 secrets_json,
                 retention,
@@ -166,6 +170,9 @@ fn main() -> Result<()> {
             } => {
                 engines::engine_for(&engine)?;
                 schedule::validate(&schedule)?;
+                if let Some(vs) = &verify_schedule {
+                    schedule::validate(vs)?;
+                }
                 let secrets_json = if secrets_json == "-" {
                     let mut buf = String::new();
                     std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
@@ -182,7 +189,7 @@ fn main() -> Result<()> {
                     name: name.clone(),
                     engine,
                     schedule,
-                    verify_schedule: None,
+                    verify_schedule,
                     retention: parse_retention(&retention)?,
                     healthchecks_uuid,
                     settings: serde_json::from_str(&settings_json)
@@ -286,6 +293,18 @@ fn main() -> Result<()> {
                 println!("notify: none configured");
             } else {
                 println!("notify: {}", channels.join(", "));
+            }
+            let mut scratch = Vec::new();
+            if cfg.verify.postgres_url.is_some() {
+                scratch.push("postgres scratch configured");
+            }
+            if cfg.verify.mongodb_uri.is_some() {
+                scratch.push("mongodb scratch configured");
+            }
+            if scratch.is_empty() {
+                println!("verify: no scratch databases configured");
+            } else {
+                println!("verify: {}", scratch.join(", "));
             }
             Ok(())
         }

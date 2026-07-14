@@ -77,4 +77,48 @@ fn full_backup_into_local_restic_repo() {
     assert!(out.contains("snapshot"));
     let snaps = run(&["snapshots", "--source", "e2e-db"]);
     assert!(snaps.contains("source=e2e-db"));
+
+    // restore roundtrip with shims: pg_restore records argv, psql answers queries
+    let pg_restore = shim.join("pg_restore");
+    std::fs::write(
+        &pg_restore,
+        "#!/bin/sh\necho \"$@\" > \"$SHIM_MARKER\"\nexit 0\n",
+    )
+    .unwrap();
+    let psql = shim.join("psql");
+    std::fs::write(&psql, "#!/bin/sh\necho 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pg_restore, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&psql, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let marker = dir.path().join("pg_restore_argv.txt");
+    let out = Command::new(env!("CARGO_BIN_EXE_vaultkeeper"))
+        .env("VAULTKEEPER_MASTER_KEY", K)
+        .env("VAULTKEEPER_DB", &db)
+        .env("VAULTKEEPER_CONFIG", &cfg_path)
+        .env("PATH", &path_env)
+        .env("SHIM_MARKER", &marker)
+        .args([
+            "restore",
+            "--source",
+            "e2e-db",
+            "--target",
+            "postgres://u:pw@elsewhere.example.com:5432/restored",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "restore failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let argv = std::fs::read_to_string(&marker).unwrap();
+    assert!(argv.contains("--clean"));
+    assert!(argv.contains("-d restored"));
+    assert!(
+        !argv.contains("pw"),
+        "password must never reach pg_restore argv"
+    );
 }
