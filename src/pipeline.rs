@@ -263,6 +263,7 @@ mod tests {
                 monthly: 6,
             },
             healthchecks_uuid: None,
+            verify_healthchecks_uuid: None,
             settings: serde_json::json!({}),
             secrets: HashMap::new(),
         })
@@ -364,6 +365,7 @@ mod tests {
                 monthly: 6,
             },
             healthchecks_uuid: None,
+            verify_healthchecks_uuid: None,
             settings: serde_json::json!({}),
             secrets: std::collections::HashMap::new(),
         })

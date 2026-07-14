@@ -16,6 +16,7 @@ pub struct NewSource {
     pub verify_schedule: Option<String>,
     pub retention: Retention,
     pub healthchecks_uuid: Option<String>,
+    pub verify_healthchecks_uuid: Option<String>,
     pub settings: serde_json::Value,
     pub secrets: HashMap<String, String>,
 }
@@ -28,9 +29,42 @@ pub struct SourceRow {
     pub verify_schedule: Option<String>,
     pub retention: Retention,
     pub healthchecks_uuid: Option<String>,
+    pub verify_healthchecks_uuid: Option<String>,
     pub settings: serde_json::Value,
     pub secrets: HashMap<String, String>,
     pub enabled: bool,
+}
+
+/// Decryption-free projection of a source row for the TUI's source lists:
+/// no `secrets` field exists on this type, so secret material can never end
+/// up in TUI screen state by accident.
+// Consumed by plan-6 TUI tasks (Task 3's Sources/Dashboard state and the
+// Sources tab list).
+#[allow(dead_code)]
+pub struct SourceMeta {
+    pub id: i64,
+    pub name: String,
+    pub engine: String,
+    pub schedule: String,
+    pub verify_schedule: Option<String>,
+    pub retention: Retention,
+    pub healthchecks_uuid: Option<String>,
+    pub verify_healthchecks_uuid: Option<String>,
+    pub settings: serde_json::Value,
+    pub enabled: bool,
+}
+
+/// A run joined with its source name, for history display without a second
+/// lookup per row.
+// Consumed by plan-6 TUI tasks (Task 3's History tab state).
+#[allow(dead_code)]
+pub struct RunView {
+    pub source: String,
+    pub kind: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub detail: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -55,6 +89,7 @@ CREATE TABLE IF NOT EXISTS sources (
   verify_schedule TEXT,
   retention_json TEXT NOT NULL,
   healthchecks_uuid TEXT,
+  verify_healthchecks_uuid TEXT,
   settings_json TEXT NOT NULL,
   secret_blob BLOB,
   enabled INTEGER NOT NULL DEFAULT 1
@@ -96,6 +131,17 @@ impl Store {
     pub fn open(path: &str, key: MasterKey) -> Result<Self> {
         let conn = Connection::open(path).with_context(|| format!("cannot open db {path}"))?;
         conn.execute_batch(MIGRATIONS)?;
+        // Fresh installs get verify_healthchecks_uuid natively from the
+        // CREATE TABLE above; existing databases upgrade in place here so
+        // both paths converge on the same schema.
+        let has_verify_hc: bool = conn
+            .prepare("PRAGMA table_info(sources)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|c| c == "verify_healthchecks_uuid");
+        if !has_verify_hc {
+            conn.execute_batch("ALTER TABLE sources ADD COLUMN verify_healthchecks_uuid TEXT;")?;
+        }
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
@@ -107,8 +153,8 @@ impl Store {
         let blob = self.key.seal(serde_json::to_vec(&s.secrets)?.as_slice());
         self.conn.execute(
             "INSERT INTO sources (name, engine, schedule, verify_schedule, retention_json,
-             healthchecks_uuid, settings_json, secret_blob)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             healthchecks_uuid, verify_healthchecks_uuid, settings_json, secret_blob)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 s.name,
                 s.engine,
@@ -116,6 +162,7 @@ impl Store {
                 s.verify_schedule,
                 serde_json::to_string(&s.retention)?,
                 s.healthchecks_uuid,
+                s.verify_healthchecks_uuid,
                 serde_json::to_string(&s.settings)?,
                 blob
             ],
@@ -137,6 +184,7 @@ impl Store {
             verify_schedule: row.get("verify_schedule")?,
             retention: serde_json::from_str(&row.get::<_, String>("retention_json")?)?,
             healthchecks_uuid: row.get("healthchecks_uuid")?,
+            verify_healthchecks_uuid: row.get("verify_healthchecks_uuid")?,
             settings: serde_json::from_str(&row.get::<_, String>("settings_json")?)?,
             secrets,
             enabled: row.get::<_, i64>("enabled")? != 0,
@@ -160,6 +208,91 @@ impl Store {
             out.push(self.row_to_source(row)?);
         }
         Ok(out)
+    }
+
+    /// Lists sources without ever touching or decrypting `secret_blob`: the
+    /// column is not even in the SELECT list, so secret material cannot leak
+    /// into TUI screen state through this path.
+    // Consumed by plan-6 TUI tasks (data.rs refresh powering the Sources and
+    // Dashboard tabs).
+    #[allow(dead_code)]
+    pub fn list_sources_meta(&self) -> Result<Vec<SourceMeta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, engine, schedule, verify_schedule, retention_json,
+                    healthchecks_uuid, verify_healthchecks_uuid, settings_json, enabled
+             FROM sources ORDER BY name",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(SourceMeta {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                engine: r.get(2)?,
+                schedule: r.get(3)?,
+                verify_schedule: r.get(4)?,
+                retention: serde_json::from_str(&r.get::<_, String>(5)?)?,
+                healthchecks_uuid: r.get(6)?,
+                verify_healthchecks_uuid: r.get(7)?,
+                settings: serde_json::from_str(&r.get::<_, String>(8)?)?,
+                enabled: r.get::<_, i64>(9)? != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Updates all non-secret fields (and the name itself) for the source
+    /// currently named `original_name`. `keep_secrets: true` leaves the
+    /// existing sealed blob untouched (used when a TUI edit form's secrets
+    /// field was left blank); `false` seals `s.secrets` fresh in its place.
+    // Consumed by plan-6 TUI tasks (SaveSource command handling in data.rs).
+    #[allow(dead_code)]
+    pub fn update_source(
+        &self,
+        original_name: &str,
+        s: &NewSource,
+        keep_secrets: bool,
+    ) -> Result<()> {
+        crate::store::validate_name(&s.name)?;
+        let n = if keep_secrets {
+            self.conn.execute(
+                "UPDATE sources SET name=?2, engine=?3, schedule=?4, verify_schedule=?5,
+                 retention_json=?6, healthchecks_uuid=?7, verify_healthchecks_uuid=?8, settings_json=?9
+                 WHERE name=?1",
+                params![
+                    original_name,
+                    s.name,
+                    s.engine,
+                    s.schedule,
+                    s.verify_schedule,
+                    serde_json::to_string(&s.retention)?,
+                    s.healthchecks_uuid,
+                    s.verify_healthchecks_uuid,
+                    serde_json::to_string(&s.settings)?
+                ],
+            )?
+        } else {
+            let blob = self.key.seal(serde_json::to_vec(&s.secrets)?.as_slice());
+            self.conn.execute(
+                "UPDATE sources SET name=?2, engine=?3, schedule=?4, verify_schedule=?5,
+                 retention_json=?6, healthchecks_uuid=?7, verify_healthchecks_uuid=?8, settings_json=?9,
+                 secret_blob=?10 WHERE name=?1",
+                params![
+                    original_name,
+                    s.name,
+                    s.engine,
+                    s.schedule,
+                    s.verify_schedule,
+                    serde_json::to_string(&s.retention)?,
+                    s.healthchecks_uuid,
+                    s.verify_healthchecks_uuid,
+                    serde_json::to_string(&s.settings)?,
+                    blob
+                ],
+            )?
+        };
+        anyhow::ensure!(n == 1, "no source named {original_name}");
+        Ok(())
     }
 
     pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<()> {
@@ -238,6 +371,31 @@ impl Store {
         Ok(())
     }
 
+    /// Runs joined with their source name, newest first, for history display
+    /// without a per-row source lookup.
+    // Consumed by plan-6 TUI tasks (data.rs refresh powering the History tab).
+    #[allow(dead_code)]
+    pub fn recent_runs_view(&self, limit: i64) -> Result<Vec<RunView>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.name, r.kind, r.status, r.started_at, r.finished_at, r.detail
+             FROM runs r JOIN sources s ON s.id = r.source_id
+             ORDER BY r.id DESC LIMIT ?1",
+        )?;
+        let mut rows = stmt.query(params![limit])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(RunView {
+                source: r.get(0)?,
+                kind: r.get(1)?,
+                status: r.get(2)?,
+                started_at: r.get(3)?,
+                finished_at: r.get(4)?,
+                detail: r.get(5)?,
+            });
+        }
+        Ok(out)
+    }
+
     pub fn run_detail(&self, run_id: i64) -> Result<Option<String>> {
         let detail = self.conn.query_row(
             "SELECT detail FROM runs WHERE id = ?1",
@@ -304,6 +462,7 @@ mod tests {
                 monthly: 6,
             },
             healthchecks_uuid: None,
+            verify_healthchecks_uuid: None,
             settings: serde_json::json!({"host": "db.example.com", "port": 5432, "dbname": "app", "user": "postgres"}),
             secrets: HashMap::from([("password".to_string(), "pw".to_string())]),
         }
@@ -497,6 +656,78 @@ mod tests {
         assert_eq!(runs[0].kind, "verify");
         assert!(runs[0].finished_at.is_some());
         assert!(runs[0].detail.as_deref().unwrap().contains("in progress"));
+    }
+
+    #[test]
+    fn verify_hc_uuid_roundtrips_and_migrates() {
+        let st = store();
+        let mut s = sample();
+        s.verify_healthchecks_uuid = Some("vhc-123".into());
+        st.add_source(&s).unwrap();
+        assert_eq!(
+            st.get_source("acme-db")
+                .unwrap()
+                .verify_healthchecks_uuid
+                .as_deref(),
+            Some("vhc-123")
+        );
+    }
+
+    #[test]
+    fn list_sources_meta_never_touches_secrets() {
+        let st = store();
+        st.add_source(&sample()).unwrap();
+        let metas = st.list_sources_meta().unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].name, "acme-db");
+        assert_eq!(metas[0].retention.daily, 7);
+        // SourceMeta has no secrets field at all: enforced by the type.
+    }
+
+    #[test]
+    fn update_source_keep_secrets_preserves_blob() {
+        let st = store();
+        st.add_source(&sample()).unwrap();
+        let mut edited = sample();
+        edited.schedule = "0 3 * * *".into();
+        edited.secrets = std::collections::HashMap::new();
+        st.update_source("acme-db", &edited, true).unwrap();
+        let row = st.get_source("acme-db").unwrap();
+        assert_eq!(row.schedule, "0 3 * * *");
+        assert_eq!(row.secrets.get("password").unwrap(), "pw", "blob preserved");
+    }
+
+    #[test]
+    fn update_source_reseal_replaces_secrets_and_can_rename() {
+        let st = store();
+        st.add_source(&sample()).unwrap();
+        let mut edited = sample();
+        edited.name = "acme-db2".into();
+        edited.secrets =
+            std::collections::HashMap::from([("password".to_string(), "pw2".to_string())]);
+        st.update_source("acme-db", &edited, false).unwrap();
+        assert!(st.get_source("acme-db").is_err());
+        assert_eq!(
+            st.get_source("acme-db2")
+                .unwrap()
+                .secrets
+                .get("password")
+                .unwrap(),
+            "pw2"
+        );
+    }
+
+    #[test]
+    fn recent_runs_view_joins_source_names() {
+        let st = store();
+        let sid = st.add_source(&sample()).unwrap();
+        let r = st.start_run(sid, "backup").unwrap();
+        st.finish_run(r, "success", None, Some("snapX"), None)
+            .unwrap();
+        let views = st.recent_runs_view(10).unwrap();
+        assert_eq!(views[0].source, "acme-db");
+        assert_eq!(views[0].kind, "backup");
+        assert_eq!(views[0].status, "success");
     }
 
     #[test]

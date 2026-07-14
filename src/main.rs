@@ -86,6 +86,8 @@ enum SourceCmd {
         retention: String,
         #[arg(long)]
         healthchecks_uuid: Option<String>,
+        #[arg(long)]
+        verify_healthchecks_uuid: Option<String>,
     },
     List,
     Enable {
@@ -110,26 +112,6 @@ fn config_path() -> PathBuf {
 
 fn open_store() -> Result<store::Store> {
     store::Store::open(&db_path(), crypto::MasterKey::from_env()?)
-}
-
-fn parse_retention(s: &str) -> Result<types::Retention> {
-    let parts: Vec<u32> = s
-        .split(',')
-        .map(|p| {
-            p.trim()
-                .parse::<u32>()
-                .context("retention must be daily,weekly,monthly numbers")
-        })
-        .collect::<Result<_>>()?;
-    anyhow::ensure!(
-        parts.len() == 3,
-        "retention must have exactly three numbers: daily,weekly,monthly"
-    );
-    Ok(types::Retention {
-        daily: parts[0],
-        weekly: parts[1],
-        monthly: parts[2],
-    })
 }
 
 fn tool_on_path(name: &str) -> bool {
@@ -167,6 +149,7 @@ fn main() -> Result<()> {
                 secrets_json,
                 retention,
                 healthchecks_uuid,
+                verify_healthchecks_uuid,
             } => {
                 engines::engine_for(&engine)?;
                 schedule::validate(&schedule)?;
@@ -190,8 +173,9 @@ fn main() -> Result<()> {
                     engine,
                     schedule,
                     verify_schedule,
-                    retention: parse_retention(&retention)?,
+                    retention: types::Retention::parse_csv(&retention)?,
                     healthchecks_uuid,
+                    verify_healthchecks_uuid,
                     settings: serde_json::from_str(&settings_json)
                         .context("invalid --settings-json")?,
                     secrets: serde_json::from_str::<HashMap<String, String>>(&secrets_json)

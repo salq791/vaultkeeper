@@ -149,9 +149,15 @@ pub fn execute_verify(
     if let Err(je) = st.finish_run(run_id, status, None, None, Some(&detail)) {
         tracing::warn!("failed to journal verify run {run_id}: {je:#}");
     }
+    // Notify source.verify_healthchecks_uuid, NEVER the backup healthchecks_uuid:
+    // the backup check measures backup freshness (a dead-man switch), and a
+    // verify run pinging it would defeat that purpose by making the switch
+    // look alive even when backups have stopped. When unset, verify sends no
+    // healthchecks ping at all; webhook and SES notification are unaffected,
+    // since those are gated on the run status, not on this uuid.
     notifier.notify(
         &source.name,
-        source.healthchecks_uuid.as_deref(),
+        source.verify_healthchecks_uuid.as_deref(),
         &RunEvent::Finished {
             status,
             snapshot_id: None,

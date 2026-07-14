@@ -185,7 +185,7 @@ fn source_disable_then_list_shows_disabled() {
 }
 
 #[test]
-fn source_add_accepts_verify_schedule_and_validates_it() {
+fn source_add_accepts_verify_schedule_and_verify_hc_uuid_and_validates_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("vk.db");
 
@@ -203,6 +203,8 @@ fn source_add_accepts_verify_schedule_and_validates_it() {
             "0 2 * * *",
             "--verify-schedule",
             "0 5 * * 0",
+            "--verify-healthchecks-uuid",
+            "hc-test-uuid",
             "--settings-json",
             r#"{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}"#,
             "--secrets-json",
