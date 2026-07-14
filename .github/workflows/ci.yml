@@ -50,3 +50,11 @@ jobs:
           tags: |
             ghcr.io/salq791/vaultkeeper:latest
             ghcr.io/salq791/vaultkeeper:sha-${{ github.sha }}
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [test]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - run: docker build -t vaultkeeper:smoke .
+      - run: bash scripts/smoke.sh
