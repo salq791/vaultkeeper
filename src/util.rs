@@ -1,3 +1,22 @@
+/// Recursively walk `root` for the first file or directory entry named `name`.
+/// Restic restores recreate the original absolute path under `dest`, so
+/// engines locate their payload this way after a restore.
+pub fn find_named(root: &std::path::Path, name: &str) -> anyhow::Result<std::path::PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy() == name {
+                return Ok(entry.path());
+            }
+            if entry.file_type()?.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    anyhow::bail!("could not find '{name}' under {}", root.display())
+}
+
 pub fn truncate_marked(s: &str, max_chars: usize) -> String {
     let mut out: String = s.chars().take(max_chars).collect();
     if s.chars().count() > max_chars {
@@ -172,6 +191,15 @@ mod tests {
         .unwrap();
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("oops"));
+    }
+
+    #[test]
+    fn find_named_locates_nested_entry() {
+        let d = tempfile::tempdir().unwrap();
+        let deep = d.path().join("a").join("b").join("target-dir");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert_eq!(find_named(d.path(), "target-dir").unwrap(), deep);
+        assert!(find_named(d.path(), "missing").is_err());
     }
 
     #[test]

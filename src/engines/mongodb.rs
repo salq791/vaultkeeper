@@ -1,10 +1,18 @@
-use super::{DumpCtx, Engine};
+use super::{DumpCtx, Engine, RestoreCtx};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct MongodbEngine;
+
+/// Naive host extraction for same-host comparison: text between '@' and the
+/// next ':' or '/' or end. Handles both mongodb:// and mongodb+srv:// forms.
+pub fn uri_host(uri: &str) -> Option<String> {
+    let after_at = uri.split('@').nth(1)?;
+    let end = after_at.find([':', '/']).unwrap_or(after_at.len());
+    Some(after_at[..end].to_string())
+}
 
 // No Debug derive: config_contents carries the raw secret uri, and a Debug
 // impl would let any future {:?} or dbg!() leak credentials into logs.
@@ -65,6 +73,53 @@ impl Engine for MongodbEngine {
             );
         }
         Ok(ctx.staging_dir.clone())
+    }
+
+    fn restore(&self, ctx: &RestoreCtx) -> Result<()> {
+        let target = ctx
+            .target
+            .as_deref()
+            .context("mongodb restore requires --target <mongodb-uri>")?;
+        let source_host = ctx
+            .secrets
+            .get("uri")
+            .and_then(|u| uri_host(u))
+            .unwrap_or_default();
+        if !ctx.force_same_host
+            && !source_host.is_empty()
+            && uri_host(target).as_deref() == Some(source_host.as_str())
+        {
+            bail!("target host matches the source host; pass --force-same-host to override");
+        }
+        let payload = crate::util::find_named(&ctx.restored_dir, &ctx.source_name)?;
+        let dump_dir = payload.join("dump");
+        let config_path = payload.join(".mongorestore-config.yml");
+        crate::util::write_new_0600(&config_path, format!("uri: {target}\n").as_bytes())?;
+        let mut cmd = Command::new("mongorestore");
+        cmd.args([
+            "--config".to_string(),
+            config_path.display().to_string(),
+            "--drop".to_string(),
+            "--dir".to_string(),
+            dump_dir.display().to_string(),
+        ])
+        .env_remove("VAULTKEEPER_MASTER_KEY")
+        .env_remove("RESTIC_PASSWORD");
+        let out =
+            crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings));
+        let _ = std::fs::remove_file(&config_path);
+        if config_path.exists() {
+            bail!("mongorestore config file could not be removed; aborting so credentials are not left on disk");
+        }
+        let out =
+            out.context("failed to spawn mongorestore (is mongodb-database-tools installed?)")?;
+        if !out.status.success() {
+            bail!(
+                "mongorestore failed: {}",
+                crate::util::truncate_marked(&String::from_utf8_lossy(&out.stderr), 2000)
+            );
+        }
+        Ok(())
     }
 }
 
@@ -132,5 +187,35 @@ mod tests {
                 Err(e) => e,
             };
         assert!(err.to_string().contains("uri"));
+    }
+
+    #[test]
+    fn uri_host_extracts() {
+        assert_eq!(
+            uri_host("mongodb://u:p@mongo.example.com:27017/app").as_deref(),
+            Some("mongo.example.com")
+        );
+        assert_eq!(
+            uri_host("mongodb+srv://u:p@cluster.example.com/app").as_deref(),
+            Some("cluster.example.com")
+        );
+    }
+
+    #[test]
+    fn restore_refuses_same_host_without_force() {
+        let ctx = super::super::RestoreCtx {
+            restored_dir: std::path::PathBuf::from("/nonexistent"),
+            source_name: "acme-db".into(),
+            target: Some("mongodb://u:p@mongo.example.com:27017/other".into()),
+            force_same_host: false,
+            confirm_remote_overwrite: false,
+            settings: serde_json::json!({}),
+            secrets: HashMap::from([(
+                "uri".to_string(),
+                "mongodb://u:p@mongo.example.com:27017/app".to_string(),
+            )]),
+        };
+        let err = MongodbEngine.restore(&ctx).unwrap_err();
+        assert!(err.to_string().contains("force-same-host"));
     }
 }

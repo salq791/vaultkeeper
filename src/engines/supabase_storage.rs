@@ -1,4 +1,4 @@
-use super::{DumpCtx, Engine};
+use super::{DumpCtx, Engine, RestoreCtx};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -73,6 +73,36 @@ impl Engine for SupabaseStorageEngine {
         }
         Ok(ctx.mirror_root.clone())
     }
+
+    fn restore(&self, ctx: &RestoreCtx) -> Result<()> {
+        anyhow::ensure!(
+            ctx.confirm_remote_overwrite,
+            "storage restore OVERWRITES the remote bucket contents; pass --confirm-remote-overwrite to proceed"
+        );
+        let mirror = crate::util::find_named(&ctx.restored_dir, &ctx.source_name)?;
+        // rclone_invocation's argv direction is dump-shaped (remote -> mirror);
+        // restore reuses only its env config and builds the reversed argv here.
+        let (_, env) = rclone_invocation(&ctx.settings, &ctx.secrets, &mirror)?;
+        let mut cmd = Command::new("rclone");
+        cmd.args([
+            "sync".to_string(),
+            mirror.display().to_string(),
+            "SUPA:".to_string(),
+        ])
+        .envs(env)
+        .env_remove("VAULTKEEPER_MASTER_KEY")
+        .env_remove("RESTIC_PASSWORD");
+        let out =
+            crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings))
+                .context("failed to spawn rclone (is it installed?)")?;
+        if !out.status.success() {
+            bail!(
+                "rclone restore sync failed: {}",
+                crate::util::truncate_marked(&String::from_utf8_lossy(&out.stderr), 2000)
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -123,5 +153,23 @@ mod tests {
         assert!(e1.to_string().contains("endpoint"));
         let e2 = rclone_invocation(&settings(), &HashMap::new(), Path::new("/m")).unwrap_err();
         assert!(e2.to_string().contains("access_key"));
+    }
+
+    #[test]
+    fn storage_restore_requires_confirmation() {
+        let ctx = super::super::RestoreCtx {
+            restored_dir: std::path::PathBuf::from("/nonexistent"),
+            source_name: "acme-storage".into(),
+            target: None,
+            force_same_host: false,
+            confirm_remote_overwrite: false,
+            settings: serde_json::json!({"endpoint": "https://proj.storage.example.com/storage/v1/s3"}),
+            secrets: std::collections::HashMap::from([
+                ("access_key".to_string(), "AK".to_string()),
+                ("secret_key".to_string(), "SK".to_string()),
+            ]),
+        };
+        let err = SupabaseStorageEngine.restore(&ctx).unwrap_err();
+        assert!(err.to_string().contains("confirm-remote-overwrite"));
     }
 }

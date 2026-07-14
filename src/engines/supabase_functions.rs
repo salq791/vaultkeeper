@@ -1,4 +1,4 @@
-use super::{DumpCtx, Engine};
+use super::{DumpCtx, Engine, RestoreCtx};
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
@@ -73,6 +73,21 @@ impl Engine for SupabaseFunctionsEngine {
         // the auth config export can contain SMTP and OAuth provider secrets, hence 0600
         crate::util::write_new_0600(&ctx.staging_dir.join("auth-config.json"), &body)?;
         Ok(ctx.staging_dir.clone())
+    }
+
+    fn restore(&self, ctx: &RestoreCtx) -> Result<()> {
+        let payload = crate::util::find_named(&ctx.restored_dir, &ctx.source_name)?;
+        println!(
+            "Edge Functions are redeployed with the supabase CLI, not written back by vaultkeeper."
+        );
+        println!("Restored source is at: {}", payload.display());
+        println!("Steps:");
+        println!("  1. cd into the restored directory shown above");
+        println!(
+            "  2. supabase functions deploy --project-ref <your-project-ref> (per function or all)"
+        );
+        println!("  3. auth-config.json in the same directory is a reference for manual settings re-entry");
+        Ok(())
     }
 }
 

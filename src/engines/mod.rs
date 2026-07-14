@@ -17,9 +17,26 @@ pub struct DumpCtx {
     pub secrets: HashMap<String, String>,
 }
 
+// No Debug derive: secrets carries restore-target credentials (e.g. a
+// mongodb uri or postgres password embedded in target), and a Debug impl
+// would let any future {:?} or dbg!() leak them into logs.
+pub struct RestoreCtx {
+    pub restored_dir: PathBuf,
+    pub source_name: String,
+    pub target: Option<String>,
+    pub force_same_host: bool,
+    pub confirm_remote_overwrite: bool,
+    pub settings: serde_json::Value,
+    pub secrets: HashMap<String, String>,
+}
+
 pub trait Engine {
     /// Produce the backup payload; return the directory restic should snapshot.
     fn dump(&self, ctx: &DumpCtx) -> Result<PathBuf>;
+    /// Restore a previously-dumped payload back to a live target.
+    #[allow(dead_code)]
+    // Consumed by Task 6: CLI restore wiring.
+    fn restore(&self, ctx: &RestoreCtx) -> Result<()>;
 }
 
 pub fn engine_for(kind: &str) -> Result<Box<dyn Engine>> {

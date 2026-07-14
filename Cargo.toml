@@ -26,6 +26,7 @@ chrono = "0.4"
 aws-config = "1"
 aws-sdk-sesv2 = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"
