@@ -8,18 +8,19 @@ pub fn sleep_duration(next: DateTime<Local>, now: DateTime<Local>) -> std::time:
 
 pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
     let st = store::Store::open(&db_path, crypto::MasterKey::from_env()?)?;
-    let sources: Vec<_> = st
+    let sources: Vec<(String, String)> = st
         .list_sources()?
         .into_iter()
         .filter(|s| s.enabled)
+        .map(|s| (s.name, s.schedule))
         .collect();
     drop(st);
     anyhow::ensure!(
         !sources.is_empty(),
         "no enabled sources; add one with 'vaultkeeper source add'"
     );
-    for s in &sources {
-        schedule::validate(&s.schedule).with_context(|| format!("source {}", s.name))?;
+    for (name, schedule) in &sources {
+        schedule::validate(schedule).with_context(|| format!("source {name}"))?;
     }
     tracing::info!(
         "daemon starting with {} enabled source(s); source changes require a restart",
@@ -43,43 +44,38 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut handles = Vec::new();
     let cfg = std::sync::Arc::new(cfg);
-    for source in sources {
+    for (name, schedule_expr) in sources {
         let cfg = cfg.clone();
         let db_path = db_path.clone();
         let mut shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
             loop {
-                let next = match schedule::next_occurrence(&source.schedule, Local::now()) {
+                let next = match schedule::next_occurrence(&schedule_expr, Local::now()) {
                     Ok(n) => n,
                     Err(e) => {
-                        tracing::error!(
-                            "{}: schedule error, stopping this source: {e:#}",
-                            source.name
-                        );
+                        tracing::error!("{}: schedule error, stopping this source: {e:#}", name);
                         return;
                     }
                 };
-                tracing::info!("{}: next run at {}", source.name, next);
+                tracing::info!("{}: next run at {}", name, next);
                 tokio::select! {
                     _ = tokio::time::sleep(sleep_duration(next, Local::now())) => {}
                     _ = shutdown.changed() => {
-                        tracing::info!("{}: shutdown requested", source.name);
+                        tracing::info!("{}: shutdown requested", name);
                         return;
                     }
                 }
                 let cfg2 = cfg.clone();
                 let db2 = db_path.clone();
-                let name = source.name.clone();
+                let name2 = name.clone();
                 let join =
-                    tokio::task::spawn_blocking(move || exec::execute_source(&cfg2, &db2, &name));
+                    tokio::task::spawn_blocking(move || exec::execute_source(&cfg2, &db2, &name2));
                 match join.await {
-                    Ok(Ok(outcome)) => tracing::info!(
-                        "{}: run finished with status {}",
-                        source.name,
-                        outcome.status
-                    ),
-                    Ok(Err(e)) => tracing::error!("{}: run failed: {e:#}", source.name),
-                    Err(e) => tracing::error!("{}: run panicked: {e}", source.name),
+                    Ok(Ok(outcome)) => {
+                        tracing::info!("{}: run finished with status {}", name, outcome.status)
+                    }
+                    Ok(Err(e)) => tracing::error!("{}: run failed: {e:#}", name),
+                    Err(e) => tracing::error!("{}: run panicked: {e}", name),
                 }
             }
         }));

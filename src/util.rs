@@ -73,8 +73,11 @@ pub fn output_with_timeout(
         None => {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = out_thread.join();
-            let _ = err_thread.join();
+            // Do not join the readers: a grandchild holding the inherited pipe
+            // write end would block EOF forever. Output is discarded on this
+            // path; detached readers exit when the pipes finally close.
+            drop(out_thread);
+            drop(err_thread);
             anyhow::bail!(
                 "{program} timed out after {}s and was killed",
                 timeout.as_secs()
