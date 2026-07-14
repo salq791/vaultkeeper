@@ -4,6 +4,10 @@ use clap::{Parser, Subcommand};
 mod config;
 #[allow(dead_code)]
 mod crypto;
+#[allow(dead_code)]
+mod store;
+#[allow(dead_code)]
+mod types;
 
 #[derive(Parser)]
 #[command(name = "vaultkeeper", version, about)]
