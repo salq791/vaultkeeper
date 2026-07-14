@@ -5,7 +5,14 @@ cd "$(dirname "$0")/.."
 COMPOSE="docker compose -f docker-compose.smoke.yml"
 VK="$COMPOSE exec -T vaultkeeper vaultkeeper"
 
-cleanup() { $COMPOSE down -v --remove-orphans >/dev/null 2>&1 || true; }
+cleanup() {
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "== smoke failed (exit $status): recent container logs =="
+    $COMPOSE logs --tail 100 || true
+  fi
+  $COMPOSE down -v --remove-orphans >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 $COMPOSE up -d --wait
