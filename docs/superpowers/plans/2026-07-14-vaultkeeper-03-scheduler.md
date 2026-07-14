@@ -783,15 +783,19 @@ pub fn execute_source(
     let notifier = Notifier::from_notify(&cfg.notify)?;
     notifier.notify(&source.name, source.healthchecks_uuid.as_deref(), &RunEvent::Started);
 
+    // ensure_init runs inside the same result handling as run_backup so a
+    // repo-init failure still reaches the Err arm below and fires a Finished
+    // failed notification (webhook/email/hc-fail), not just the Started ping.
     use crate::restic::Repo as _;
-    repo.ensure_init()?;
-    let result = pipeline::run_backup(&st, &repo, &source, &cfg.global.staging_dir, engine.as_ref());
+    let result = (|| {
+        repo.ensure_init()?;
+        pipeline::run_backup(&st, &repo, &source, &cfg.global.staging_dir, engine.as_ref())
+    })();
     match &result {
         Ok(outcome) => {
-            let detail = st
-                .recent_runs(1)
-                .ok()
-                .and_then(|r| r.first().and_then(|row| row.detail.clone()));
+            // Scoped to this run's id, not the most recently written row:
+            // recent_runs(1) races when sibling sources finish concurrently.
+            let detail = st.run_detail(outcome.run_id).ok().flatten();
             notifier.notify(
                 &source.name,
                 source.healthchecks_uuid.as_deref(),
@@ -838,6 +842,22 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
         "daemon starting with {} enabled source(s); source changes require a restart",
         sources.len()
     );
+
+    // Fail fast if the repo is unreachable at daemon startup rather than
+    // waiting for the first scheduled run to discover it hours later.
+    let mut repo = crate::restic::ResticCli::new(
+        cfg.global.restic_repo.clone(),
+        cfg.global.restic_password.clone(),
+    );
+    if let Some(mins) = cfg.global.restic_timeout_minutes {
+        repo = repo.with_timeout(std::time::Duration::from_secs(mins.saturating_mul(60)));
+    }
+    {
+        use crate::restic::Repo as _;
+        repo.ensure_init()
+            .context("restic repository unreachable at daemon startup")?;
+    }
+    tracing::info!("restic repository reachable");
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut handles = Vec::new();

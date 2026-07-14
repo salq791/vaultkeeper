@@ -194,6 +194,18 @@ impl Store {
         Ok(())
     }
 
+    pub fn run_detail(&self, run_id: i64) -> Result<Option<String>> {
+        let detail = self.conn.query_row(
+            "SELECT detail FROM runs WHERE id = ?1",
+            params![run_id],
+            |r| r.get(0),
+        )?;
+        Ok(detail)
+    }
+
+    // Only exercised by tests now that exec.rs scopes its post-run detail
+    // lookup to run_detail(run_id) instead of racing on the most recent row.
+    #[allow(dead_code)]
     pub fn recent_runs(&self, limit: i64) -> Result<Vec<RunRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_id, kind, started_at, finished_at, status, bytes, snapshot_id, detail
@@ -321,6 +333,19 @@ mod tests {
     fn set_enabled_unknown_source_errors() {
         let st = store();
         assert!(st.set_enabled("ghost", false).is_err());
+    }
+
+    #[test]
+    fn run_detail_scoped_by_run_id() {
+        let st = store();
+        let sid = st.add_source(&sample()).unwrap();
+        let r1 = st.start_run(sid, "backup").unwrap();
+        st.finish_run(r1, "failed", None, None, Some("first detail"))
+            .unwrap();
+        let r2 = st.start_run(sid, "backup").unwrap();
+        st.finish_run(r2, "success", None, None, None).unwrap();
+        assert_eq!(st.run_detail(r1).unwrap().as_deref(), Some("first detail"));
+        assert_eq!(st.run_detail(r2).unwrap(), None);
     }
 
     #[test]

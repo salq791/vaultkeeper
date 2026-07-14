@@ -26,6 +26,20 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
         sources.len()
     );
 
+    let mut repo = crate::restic::ResticCli::new(
+        cfg.global.restic_repo.clone(),
+        cfg.global.restic_password.clone(),
+    );
+    if let Some(mins) = cfg.global.restic_timeout_minutes {
+        repo = repo.with_timeout(std::time::Duration::from_secs(mins.saturating_mul(60)));
+    }
+    {
+        use crate::restic::Repo as _;
+        repo.ensure_init()
+            .context("restic repository unreachable at daemon startup")?;
+    }
+    tracing::info!("restic repository reachable");
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut handles = Vec::new();
     let cfg = std::sync::Arc::new(cfg);

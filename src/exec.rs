@@ -25,20 +25,19 @@ pub fn execute_source(
     );
 
     use crate::restic::Repo as _;
-    repo.ensure_init()?;
-    let result = pipeline::run_backup(
-        &st,
-        &repo,
-        &source,
-        &cfg.global.staging_dir,
-        engine.as_ref(),
-    );
+    let result = (|| {
+        repo.ensure_init()?;
+        pipeline::run_backup(
+            &st,
+            &repo,
+            &source,
+            &cfg.global.staging_dir,
+            engine.as_ref(),
+        )
+    })();
     match &result {
         Ok(outcome) => {
-            let detail = st
-                .recent_runs(1)
-                .ok()
-                .and_then(|r| r.first().and_then(|row| row.detail.clone()));
+            let detail = st.run_detail(outcome.run_id).ok().flatten();
             notifier.notify(
                 &source.name,
                 source.healthchecks_uuid.as_deref(),

@@ -83,8 +83,7 @@ impl ResticCli {
             .env("RESTIC_REPOSITORY", &self.repo)
             .env("RESTIC_PASSWORD", &self.password)
             .env_remove("VAULTKEEPER_MASTER_KEY");
-        let out = crate::util::output_with_timeout(&mut cmd, self.timeout)
-            .with_context(|| format!("failed to spawn {}", self.bin))?;
+        let out = crate::util::output_with_timeout(&mut cmd, self.timeout)?;
         if !out.status.success() {
             let truncated =
                 crate::util::truncate_marked(&String::from_utf8_lossy(&out.stderr), 2000);
