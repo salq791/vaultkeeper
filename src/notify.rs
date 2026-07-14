@@ -10,17 +10,32 @@ pub enum RunEvent<'a> {
     },
 }
 
+/// Statuses that count as a healthy check-in for the dead-man switch.
+/// Everything else, including statuses this version does not know,
+/// pings /fail: fail closed.
+pub fn is_success_ping(status: &str) -> bool {
+    matches!(status, "success" | "success_prune_failed" | "verify_passed")
+}
+
+/// Statuses that reach humans via webhook and email. verify_passed is
+/// included deliberately: it is the spec's scheduled verify report.
+pub fn alerts_humans(status: &str) -> bool {
+    matches!(
+        status,
+        "failed" | "success_prune_failed" | "verify_failed" | "verify_passed"
+    )
+}
+
 /// success_prune_failed still pings healthchecks success: the dead-man switch
 /// measures backup freshness and a snapshot exists. The prune problem reaches
 /// the human via webhook/email, which DO fire for success_prune_failed.
+/// Unknown statuses ping /fail: fail closed.
 pub fn hc_url(base: &str, uuid: &str, event: &RunEvent) -> String {
     let base = base.trim_end_matches('/');
     match event {
         RunEvent::Started => format!("{base}/{uuid}/start"),
-        RunEvent::Finished {
-            status: "failed", ..
-        } => format!("{base}/{uuid}/fail"),
-        RunEvent::Finished { .. } => format!("{base}/{uuid}"),
+        RunEvent::Finished { status, .. } if is_success_ping(status) => format!("{base}/{uuid}"),
+        RunEvent::Finished { .. } => format!("{base}/{uuid}/fail"),
     }
 }
 
@@ -91,7 +106,7 @@ impl Notifier {
             detail,
         } = event
         {
-            if *status == "failed" || *status == "success_prune_failed" {
+            if alerts_humans(status) {
                 if let Some(url) = &self.webhook_url {
                     let payload = webhook_payload(source_name, status, *snapshot_id, *detail);
                     if let Err(e) = self.client.post(url).json(&payload).send() {
@@ -210,5 +225,41 @@ mod tests {
         assert!(subject.contains("acme-db"));
         assert!(subject.contains("failed"));
         assert!(body.contains(" ...[truncated]"));
+    }
+
+    #[test]
+    fn unknown_status_pings_fail_closed() {
+        let ev = RunEvent::Finished {
+            status: "exploded_weirdly",
+            snapshot_id: None,
+            detail: None,
+        };
+        assert_eq!(hc_url(B, "u1", &ev), "https://hc-ping.com/u1/fail");
+    }
+
+    #[test]
+    fn verify_statuses_route_correctly() {
+        let pass = RunEvent::Finished {
+            status: "verify_passed",
+            snapshot_id: None,
+            detail: Some("tables=3"),
+        };
+        assert_eq!(hc_url(B, "u1", &pass), "https://hc-ping.com/u1");
+        let fail = RunEvent::Finished {
+            status: "verify_failed",
+            snapshot_id: None,
+            detail: Some("no tables"),
+        };
+        assert_eq!(hc_url(B, "u1", &fail), "https://hc-ping.com/u1/fail");
+    }
+
+    #[test]
+    fn alert_gating_per_status() {
+        assert!(alerts_humans("failed"));
+        assert!(alerts_humans("success_prune_failed"));
+        assert!(alerts_humans("verify_failed"));
+        assert!(alerts_humans("verify_passed"));
+        assert!(!alerts_humans("success"));
+        assert!(!alerts_humans("stale"));
     }
 }
