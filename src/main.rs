@@ -3,6 +3,7 @@ mod crypto;
 mod engines;
 mod pipeline;
 mod restic;
+mod schedule;
 mod store;
 mod types;
 mod util;
@@ -61,6 +62,14 @@ enum SourceCmd {
         healthchecks_uuid: Option<String>,
     },
     List,
+    Enable {
+        #[arg(long)]
+        name: String,
+    },
+    Disable {
+        #[arg(long)]
+        name: String,
+    },
 }
 
 fn db_path() -> String {
@@ -133,6 +142,7 @@ fn main() -> Result<()> {
                 healthchecks_uuid,
             } => {
                 engines::engine_for(&engine)?;
+                schedule::validate(&schedule)?;
                 let secrets_json = if secrets_json == "-" {
                     let mut buf = String::new();
                     std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
@@ -173,6 +183,18 @@ fn main() -> Result<()> {
                         if s.enabled { "enabled" } else { "disabled" }
                     );
                 }
+                Ok(())
+            }
+            SourceCmd::Enable { name } => {
+                let st = open_store()?;
+                st.set_enabled(&name, true)?;
+                println!("{name} enabled");
+                Ok(())
+            }
+            SourceCmd::Disable { name } => {
+                let st = open_store()?;
+                st.set_enabled(&name, false)?;
+                println!("{name} disabled");
                 Ok(())
             }
         },
@@ -216,6 +238,18 @@ fn main() -> Result<()> {
             let sources = st.list_sources()?;
             println!("config ok: staging={}", cfg.global.staging_dir.display());
             println!("db ok: {} sources", sources.len());
+            for src in &sources {
+                for (label, expr) in [
+                    ("schedule", Some(src.schedule.as_str())),
+                    ("verify_schedule", src.verify_schedule.as_deref()),
+                ] {
+                    let Some(expr) = expr else { continue };
+                    match schedule::validate(expr) {
+                        Ok(()) => println!("{}: {label} ok", src.name),
+                        Err(e) => println!("{}: {label} INVALID: {e}", src.name),
+                    }
+                }
+            }
             for tool in ["restic", "pg_dump", "mongodump", "rclone", "supabase"] {
                 println!(
                     "{tool}: {}",

@@ -25,7 +25,6 @@ pub struct SourceRow {
     pub name: String,
     pub engine: String,
     pub schedule: String,
-    #[allow(dead_code)]
     pub verify_schedule: Option<String>,
     pub retention: Retention,
     #[allow(dead_code)]
@@ -161,6 +160,15 @@ impl Store {
             out.push(self.row_to_source(row)?);
         }
         Ok(out)
+    }
+
+    pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE sources SET enabled = ?2 WHERE name = ?1",
+            params![name, enabled as i64],
+        )?;
+        anyhow::ensure!(n == 1, "no source named {name}");
+        Ok(())
     }
 
     pub fn start_run(&self, source_id: i64, kind: &str) -> Result<i64> {
@@ -299,6 +307,22 @@ mod tests {
         let mut s = sample();
         s.name = "acme-db_1".into();
         assert!(st.add_source(&s).is_ok());
+    }
+
+    #[test]
+    fn set_enabled_roundtrip() {
+        let st = store();
+        st.add_source(&sample()).unwrap();
+        st.set_enabled("acme-db", false).unwrap();
+        assert!(!st.get_source("acme-db").unwrap().enabled);
+        st.set_enabled("acme-db", true).unwrap();
+        assert!(st.get_source("acme-db").unwrap().enabled);
+    }
+
+    #[test]
+    fn set_enabled_unknown_source_errors() {
+        let st = store();
+        assert!(st.set_enabled("ghost", false).is_err());
     }
 
     #[test]
