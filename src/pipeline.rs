@@ -23,7 +23,7 @@ pub fn run_backup(
     crate::store::validate_name(&source.name)?;
     let run_id = store.start_run(source.id, "backup")?;
     let staging_dir = staging_root.join(&source.name);
-    let result = (|| -> Result<(String, i64)> {
+    let result = (|| -> Result<(String, i64, Option<String>)> {
         if staging_dir.exists() {
             std::fs::remove_dir_all(&staging_dir)?;
         }
@@ -49,18 +49,39 @@ pub fn run_backup(
         let backup_path = engine.dump(&ctx)?;
         let tag = format!("source={}", source.name);
         let summary = repo.backup(&backup_path, &tag)?;
-        repo.forget(&tag, &source.retention)?;
-        Ok((summary.snapshot_id, summary.total_bytes_processed))
+        let prune_err = repo
+            .forget(&tag, &source.retention)
+            .err()
+            .map(|e| crate::util::truncate_marked(&format!("{e:#}"), 4000));
+        Ok((
+            summary.snapshot_id,
+            summary.total_bytes_processed,
+            prune_err,
+        ))
     })();
     let _ = std::fs::remove_dir_all(&staging_dir);
 
     match result {
-        Ok((snapshot_id, bytes)) => {
+        Ok((snapshot_id, bytes, None)) => {
             store.finish_run(run_id, "success", Some(bytes), Some(&snapshot_id), None)?;
             Ok(RunOutcome {
                 run_id,
                 snapshot_id: Some(snapshot_id),
                 status: "success".into(),
+            })
+        }
+        Ok((snapshot_id, bytes, Some(prune_err))) => {
+            store.finish_run(
+                run_id,
+                "success_prune_failed",
+                Some(bytes),
+                Some(&snapshot_id),
+                Some(&prune_err),
+            )?;
+            Ok(RunOutcome {
+                run_id,
+                snapshot_id: Some(snapshot_id),
+                status: "success_prune_failed".into(),
             })
         }
         Err(e) => {
@@ -133,6 +154,25 @@ mod tests {
         fn forget(&self, tag: &str, _r: &Retention) -> Result<()> {
             self.calls.borrow_mut().push(format!("forget:{tag}"));
             Ok(())
+        }
+        fn snapshots(&self, _tag: Option<&str>) -> Result<Vec<Snapshot>> {
+            Ok(vec![])
+        }
+    }
+
+    struct PruneFailRepo;
+    impl Repo for PruneFailRepo {
+        fn ensure_init(&self) -> Result<()> {
+            Ok(())
+        }
+        fn backup(&self, _path: &Path, _tag: &str) -> Result<BackupSummary> {
+            Ok(BackupSummary {
+                snapshot_id: "snap9".into(),
+                total_bytes_processed: 7,
+            })
+        }
+        fn forget(&self, _tag: &str, _r: &Retention) -> Result<()> {
+            anyhow::bail!("repository is locked by another process")
         }
         fn snapshots(&self, _tag: Option<&str>) -> Result<Vec<Snapshot>> {
             Ok(vec![])
@@ -212,5 +252,18 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("connection refused"));
+    }
+
+    #[test]
+    fn prune_failure_after_successful_backup_is_partial_success() {
+        let (st, src, staging) = setup();
+        let out = run_backup(&st, &PruneFailRepo, &src, staging.path(), &OkEngine).unwrap();
+        assert_eq!(out.status, "success_prune_failed");
+        assert_eq!(out.snapshot_id.as_deref(), Some("snap9"));
+        let runs = st.recent_runs(1).unwrap();
+        assert_eq!(runs[0].status, "success_prune_failed");
+        assert_eq!(runs[0].snapshot_id.as_deref(), Some("snap9"));
+        assert!(runs[0].detail.as_deref().unwrap().contains("locked"));
+        assert_eq!(runs[0].bytes, Some(7));
     }
 }
