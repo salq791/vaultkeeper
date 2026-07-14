@@ -502,6 +502,7 @@ healthchecks_base = "https://hc-ping.com"
 # Scratch databases for scheduled verify runs. Start them with:
 #   docker compose --profile verify up -d
 [verify]
+# VERIFY_PG_PASSWORD is substituted textually into this URL: use a URL-safe or percent-encoded value.
 postgres_url = "postgres://verifier:${VERIFY_PG_PASSWORD}@verify-postgres:5432/scratch?sslmode=disable"
 mongodb_uri = "mongodb://verify-mongo:27017/scratch"
 ```
@@ -509,7 +510,8 @@ mongodb_uri = "mongodb://verify-mongo:27017/scratch"
 `.env.example` gains:
 
 ```
-# Password for the verify-postgres scratch database (compose verify profile)
+# Password for the verify-postgres scratch database (compose verify profile).
+# Must be URL-safe or percent-encoded (e.g. p@ss/word -> p%40ss%2Fword): it is interpolated into [verify] postgres_url.
 VERIFY_PG_PASSWORD=
 ```
 
