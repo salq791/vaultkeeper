@@ -6,8 +6,6 @@ pub fn validate(expr: &str) -> Result<()> {
     parse(expr).map(|_| ())
 }
 
-// Consumer arrives in Plan 3 Task 6 (scheduler daemon loop); unused for now.
-#[allow(dead_code)]
 pub fn next_occurrence(expr: &str, after: DateTime<Local>) -> Result<DateTime<Local>> {
     parse(expr)?
         .find_next_occurrence(&after, false)

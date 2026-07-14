@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub global: Global,
     #[serde(default)]
-    #[allow(dead_code)]
     pub notify: Notify,
 }
 
@@ -20,7 +19,6 @@ pub struct Global {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[allow(dead_code)]
 pub struct Notify {
     pub healthchecks_base: Option<String>,
     pub webhook_url: Option<String>,
@@ -28,7 +26,6 @@ pub struct Notify {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct Ses {
     pub region: String,
     pub from: String,

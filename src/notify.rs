@@ -1,8 +1,6 @@
 use crate::config::{Notify, Ses};
 use anyhow::Result;
 
-// Consumer arrives in Plan 3 Task 6 (scheduler daemon loop); unused for now.
-#[allow(dead_code)]
 pub enum RunEvent<'a> {
     Started,
     Finished {
@@ -15,7 +13,6 @@ pub enum RunEvent<'a> {
 /// success_prune_failed still pings healthchecks success: the dead-man switch
 /// measures backup freshness and a snapshot exists. The prune problem reaches
 /// the human via webhook/email, which DO fire for success_prune_failed.
-#[allow(dead_code)]
 pub fn hc_url(base: &str, uuid: &str, event: &RunEvent) -> String {
     let base = base.trim_end_matches('/');
     match event {
@@ -27,7 +24,6 @@ pub fn hc_url(base: &str, uuid: &str, event: &RunEvent) -> String {
     }
 }
 
-#[allow(dead_code)]
 pub fn webhook_payload(
     source: &str,
     status: &str,
@@ -43,7 +39,6 @@ pub fn webhook_payload(
     })
 }
 
-#[allow(dead_code)]
 pub fn email_subject_body(source: &str, status: &str, detail: Option<&str>) -> (String, String) {
     let subject = format!("[vaultkeeper] {source}: {status}");
     let body = format!(
@@ -53,8 +48,6 @@ pub fn email_subject_body(source: &str, status: &str, detail: Option<&str>) -> (
     (subject, body)
 }
 
-// Consumer arrives in Plan 3 Task 6 (scheduler daemon loop); unused for now.
-#[allow(dead_code)]
 pub struct Notifier {
     healthchecks_base: Option<String>,
     webhook_url: Option<String>,
@@ -62,7 +55,6 @@ pub struct Notifier {
     client: reqwest::blocking::Client,
 }
 
-#[allow(dead_code)]
 impl Notifier {
     pub fn from_notify(cfg: &Notify) -> Result<Notifier> {
         Ok(Notifier {
@@ -117,7 +109,6 @@ impl Notifier {
     }
 }
 
-#[allow(dead_code)]
 fn send_ses(ses: &Ses, subject: &str, body: &str) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

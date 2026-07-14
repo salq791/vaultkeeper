@@ -1,10 +1,12 @@
 mod config;
 mod crypto;
 mod engines;
+mod exec;
 mod notify;
 mod pipeline;
 mod restic;
 mod schedule;
+mod scheduler;
 mod store;
 mod types;
 mod util;
@@ -40,6 +42,8 @@ enum Command {
     },
     /// Validate configuration, database, and required tools
     CheckConfig,
+    /// Run the scheduler daemon
+    Daemon,
 }
 
 #[derive(Subcommand)]
@@ -201,18 +205,7 @@ fn main() -> Result<()> {
         },
         Command::Run { source } => {
             let cfg = config::load(&config_path())?;
-            let st = open_store()?;
-            let src = st.get_source(&source)?;
-            let engine = engines::engine_for(&src.engine)?;
-            let mut repo =
-                restic::ResticCli::new(cfg.global.restic_repo, cfg.global.restic_password);
-            if let Some(mins) = cfg.global.restic_timeout_minutes {
-                repo = repo.with_timeout(std::time::Duration::from_secs(mins.saturating_mul(60)));
-            }
-            use restic::Repo as _;
-            repo.ensure_init()?;
-            let out =
-                pipeline::run_backup(&st, &repo, &src, &cfg.global.staging_dir, engine.as_ref())?;
+            let out = exec::execute_source(&cfg, &db_path(), &source)?;
             println!(
                 "backup of {source} complete, snapshot {}",
                 out.snapshot_id.unwrap_or_default()
@@ -262,6 +255,13 @@ fn main() -> Result<()> {
                 );
             }
             Ok(())
+        }
+        Command::Daemon => {
+            let cfg = config::load(&config_path())?;
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(scheduler::run_daemon(cfg, db_path()))
         }
     }
 }

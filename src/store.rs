@@ -27,7 +27,6 @@ pub struct SourceRow {
     pub schedule: String,
     pub verify_schedule: Option<String>,
     pub retention: Retention,
-    #[allow(dead_code)]
     pub healthchecks_uuid: Option<String>,
     pub settings: serde_json::Value,
     pub secrets: HashMap<String, String>,
@@ -195,7 +194,6 @@ impl Store {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn recent_runs(&self, limit: i64) -> Result<Vec<RunRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_id, kind, started_at, finished_at, status, bytes, snapshot_id, detail

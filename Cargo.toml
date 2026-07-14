@@ -25,7 +25,7 @@ croner = "2"
 chrono = "0.4"
 aws-config = "1"
 aws-sdk-sesv2 = "1"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
 
 [dev-dependencies]
 tempfile = "3"
