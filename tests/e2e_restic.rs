@@ -27,7 +27,7 @@ fn full_backup_into_local_restic_repo() {
     let script = shim.join("pg_dump");
     std::fs::write(
         &script,
-        "#!/bin/sh\nwhile [ \"$1\" != \"-f\" ]; do shift; done\necho fakedump > \"$2\"\n",
+        "#!/bin/sh\nwhile [ \"$1\" != \"-f\" ]; do\n  [ -z \"$1\" ] && { echo \"shim: missing -f\" >&2; exit 1; }\n  shift\ndone\necho fakedump > \"$2\"\n",
     )
     .unwrap();
     #[cfg(unix)]

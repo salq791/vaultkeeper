@@ -5,6 +5,7 @@ mod pipeline;
 mod restic;
 mod store;
 mod types;
+mod util;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -113,7 +114,12 @@ fn which_path(name: &str) -> Option<PathBuf> {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
     let cli = Cli::parse();
     match cli.command {
         Command::Source { cmd } => match cmd {
@@ -133,6 +139,9 @@ fn main() -> Result<()> {
                         .context("failed to read secrets JSON from stdin")?;
                     buf
                 } else {
+                    eprintln!(
+                        "warning: inline --secrets-json exposes secrets to the process table and shell history; prefer --secrets-json -"
+                    );
                     secrets_json
                 };
                 let st = open_store()?;

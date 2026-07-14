@@ -20,6 +20,7 @@ pub fn run_backup(
     staging_root: &Path,
     engine: &dyn Engine,
 ) -> Result<RunOutcome> {
+    crate::store::validate_name(&source.name)?;
     let run_id = store.start_run(source.id, "backup")?;
     let staging_dir = staging_root.join(&source.name);
     let result = (|| -> Result<(String, i64)> {
@@ -27,6 +28,11 @@ pub fn run_backup(
             std::fs::remove_dir_all(&staging_dir)?;
         }
         std::fs::create_dir_all(&staging_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staging_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         let ctx = DumpCtx {
             staging_dir: staging_dir.clone(),
             settings: source.settings.clone(),
@@ -50,7 +56,7 @@ pub fn run_backup(
             })
         }
         Err(e) => {
-            let detail: String = format!("{e:#}").chars().take(4000).collect();
+            let detail = crate::util::truncate_marked(&format!("{e:#}"), 4000);
             if let Err(journal_err) = store.finish_run(run_id, "failed", None, None, Some(&detail))
             {
                 tracing::warn!("failed to journal run {run_id} failure: {journal_err:#}");

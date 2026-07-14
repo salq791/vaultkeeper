@@ -60,10 +60,7 @@ impl Engine for PostgresEngine {
         if !out.status.success() {
             bail!(
                 "pg_dump failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-                    .chars()
-                    .take(2000)
-                    .collect::<String>()
+                crate::util::truncate_marked(&String::from_utf8_lossy(&out.stderr), 2000)
             );
         }
         Ok(())

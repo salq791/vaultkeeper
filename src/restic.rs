@@ -72,19 +72,15 @@ impl ResticCli {
 
     fn run(&self, args: &[String]) -> Result<String> {
         let out = Command::new(&self.bin)
-            .arg("-r")
-            .arg(&self.repo)
             .args(args)
+            .env("RESTIC_REPOSITORY", &self.repo)
             .env("RESTIC_PASSWORD", &self.password)
             .env_remove("VAULTKEEPER_MASTER_KEY")
             .output()
             .with_context(|| format!("failed to spawn {}", self.bin))?;
         if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let mut truncated: String = stderr.chars().take(2000).collect();
-            if stderr.chars().count() > 2000 {
-                truncated.push_str(" ...[truncated]");
-            }
+            let truncated =
+                crate::util::truncate_marked(&String::from_utf8_lossy(&out.stderr), 2000);
             bail!(
                 "restic {} failed: {}",
                 args.first().map(String::as_str).unwrap_or(""),

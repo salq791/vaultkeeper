@@ -35,6 +35,8 @@ fn source_add_then_list_shows_source_without_secrets() {
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
+    let add_stderr = String::from_utf8_lossy(&add.stderr);
+    assert!(add_stderr.contains("warning: inline --secrets-json"));
 
     let list = bin()
         .env("VAULTKEEPER_MASTER_KEY", K)
@@ -86,6 +88,7 @@ fn source_add_reads_secrets_from_stdin() {
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
+    assert!(!String::from_utf8_lossy(&add.stderr).contains("warning:"));
 
     let list = bin()
         .env("VAULTKEEPER_MASTER_KEY", K)

@@ -8,7 +8,6 @@ repository = "https://github.com/salq791/vaultkeeper"
 
 [dependencies]
 anyhow = "1"
-thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -17,7 +16,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
-rand = "0.8"
 hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

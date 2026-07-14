@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS runs (
 /// Validates that `name` is safe to use as both a staging directory path
 /// component and a restic tag: first char ASCII alphanumeric, remaining
 /// chars ASCII alphanumeric, `-`, or `_`.
-fn validate_source_name(name: &str) -> Result<()> {
+pub fn validate_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
     let valid = match chars.next() {
         Some(first) if first.is_ascii_alphanumeric() => {
@@ -98,11 +98,13 @@ impl Store {
     pub fn open(path: &str, key: MasterKey) -> Result<Self> {
         let conn = Connection::open(path).with_context(|| format!("cannot open db {path}"))?;
         conn.execute_batch(MIGRATIONS)?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(Self { conn, key })
     }
 
     pub fn add_source(&self, s: &NewSource) -> Result<i64> {
-        validate_source_name(&s.name)?;
+        validate_name(&s.name)?;
         let blob = self.key.seal(serde_json::to_vec(&s.secrets)?.as_slice());
         self.conn.execute(
             "INSERT INTO sources (name, engine, schedule, verify_schedule, retention_json,
