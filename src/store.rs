@@ -170,11 +170,30 @@ impl Store {
         Ok(())
     }
 
+    /// Starts a run, refusing if the source already has a run in progress.
+    /// A 'running' row older than 24 hours is treated as a crashed process's
+    /// zombie: it is marked 'stale' and no longer blocks. The INSERT below is
+    /// a single conditional statement, so the check-and-claim is atomic even
+    /// across processes sharing the database file.
     pub fn start_run(&self, source_id: i64, kind: &str) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO runs (source_id, kind, status) VALUES (?1, ?2, 'running')",
+            "UPDATE runs SET status = 'stale', finished_at = datetime('now')
+             WHERE source_id = ?1 AND status = 'running'
+             AND started_at <= datetime('now', '-24 hours')",
+            params![source_id],
+        )?;
+        let inserted = self.conn.execute(
+            "INSERT INTO runs (source_id, kind, status)
+             SELECT ?1, ?2, 'running'
+             WHERE NOT EXISTS (
+               SELECT 1 FROM runs WHERE source_id = ?1 AND status = 'running'
+             )",
             params![source_id, kind],
         )?;
+        anyhow::ensure!(
+            inserted == 1,
+            "another run for this source is in progress; a run that crashed more than 24 hours ago clears automatically"
+        );
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -201,6 +220,11 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(detail)
+    }
+
+    #[cfg(test)]
+    pub fn conn_for_tests(&self) -> &rusqlite::Connection {
+        &self.conn
     }
 
     // Only exercised by tests now that exec.rs scopes its post-run detail
@@ -346,6 +370,45 @@ mod tests {
         st.finish_run(r2, "success", None, None, None).unwrap();
         assert_eq!(st.run_detail(r1).unwrap().as_deref(), Some("first detail"));
         assert_eq!(st.run_detail(r2).unwrap(), None);
+    }
+
+    #[test]
+    fn concurrent_run_for_same_source_refused() {
+        let st = store();
+        let sid = st.add_source(&sample()).unwrap();
+        let _r1 = st.start_run(sid, "backup").unwrap();
+        let err = st.start_run(sid, "verify").unwrap_err();
+        assert!(err.to_string().contains("in progress"));
+    }
+
+    #[test]
+    fn finished_run_unblocks_source() {
+        let st = store();
+        let sid = st.add_source(&sample()).unwrap();
+        let r1 = st.start_run(sid, "backup").unwrap();
+        st.finish_run(r1, "success", None, None, None).unwrap();
+        assert!(st.start_run(sid, "backup").is_ok());
+    }
+
+    #[test]
+    fn stale_running_row_is_cleared_and_does_not_block() {
+        let st = store();
+        let sid = st.add_source(&sample()).unwrap();
+        st.conn_for_tests().execute(
+            "INSERT INTO runs (source_id, kind, status, started_at) VALUES (?1, 'backup', 'running', datetime('now', '-25 hours'))",
+            rusqlite::params![sid],
+        ).unwrap();
+        let r2 = st.start_run(sid, "backup").unwrap();
+        assert!(r2 > 0);
+        let stale: i64 = st
+            .conn_for_tests()
+            .query_row(
+                "SELECT count(*) FROM runs WHERE source_id = ?1 AND status = 'stale'",
+                rusqlite::params![sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 1);
     }
 
     #[test]

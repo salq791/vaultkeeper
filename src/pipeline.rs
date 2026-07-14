@@ -22,6 +22,7 @@ pub fn run_backup(
     let run_id = store.start_run(source.id, "backup")?;
     let staging_dir = staging_root.join(&source.name);
     let result = (|| -> Result<(String, i64, Option<String>)> {
+        repo.ensure_init()?;
         if staging_dir.exists() {
             std::fs::remove_dir_all(&staging_dir)?;
         }
@@ -177,6 +178,33 @@ mod tests {
         }
     }
 
+    struct InitFailRepo;
+    impl Repo for InitFailRepo {
+        fn ensure_init(&self) -> Result<()> {
+            anyhow::bail!("repository unreachable")
+        }
+        fn backup(&self, _p: &Path, _t: &str) -> Result<BackupSummary> {
+            unreachable!()
+        }
+        fn forget(&self, _t: &str, _r: &Retention) -> Result<()> {
+            unreachable!()
+        }
+        fn snapshots(&self, _t: Option<&str>) -> Result<Vec<Snapshot>> {
+            Ok(vec![])
+        }
+    }
+
+    struct SabotageEngine {
+        db_path: std::path::PathBuf,
+    }
+    impl Engine for SabotageEngine {
+        fn dump(&self, _ctx: &DumpCtx) -> Result<std::path::PathBuf> {
+            let conn = rusqlite::Connection::open(&self.db_path).unwrap();
+            conn.execute_batch("DROP TABLE runs;").unwrap();
+            anyhow::bail!("connection refused")
+        }
+    }
+
     fn setup() -> (Store, crate::store::SourceRow, tempfile::TempDir) {
         let st = Store::open(":memory:", MasterKey::from_hex(K).unwrap()).unwrap();
         st.add_source(&NewSource {
@@ -263,5 +291,51 @@ mod tests {
         assert_eq!(runs[0].snapshot_id.as_deref(), Some("snap9"));
         assert!(runs[0].detail.as_deref().unwrap().contains("locked"));
         assert_eq!(runs[0].bytes, Some(7));
+    }
+
+    #[test]
+    fn repo_init_failure_is_journaled() {
+        let (st, src, staging) = setup();
+        let err = run_backup(&st, &InitFailRepo, &src, staging.path(), &OkEngine).unwrap_err();
+        assert!(err.to_string().contains("unreachable"));
+        let runs = st.recent_runs(1).unwrap();
+        assert_eq!(runs[0].status, "failed");
+        assert!(runs[0].detail.as_deref().unwrap().contains("unreachable"));
+    }
+
+    #[test]
+    fn journal_write_failure_preserves_original_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("vk.db");
+        let st = Store::open(db_path.to_str().unwrap(), MasterKey::from_hex(K).unwrap()).unwrap();
+        st.add_source(&NewSource {
+            name: "acme-db".into(),
+            engine: "postgres".into(),
+            schedule: "0 2 * * *".into(),
+            verify_schedule: None,
+            retention: Retention {
+                daily: 7,
+                weekly: 4,
+                monthly: 6,
+            },
+            healthchecks_uuid: None,
+            settings: serde_json::json!({}),
+            secrets: std::collections::HashMap::new(),
+        })
+        .unwrap();
+        let src = st.get_source("acme-db").unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let err = run_backup(
+            &st,
+            &MockRepo::default(),
+            &src,
+            staging.path(),
+            &SabotageEngine { db_path },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("connection refused"),
+            "original error must survive a journal write failure, got: {err:#}"
+        );
     }
 }

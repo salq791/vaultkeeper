@@ -24,17 +24,13 @@ pub fn execute_source(
         &RunEvent::Started,
     );
 
-    use crate::restic::Repo as _;
-    let result = (|| {
-        repo.ensure_init()?;
-        pipeline::run_backup(
-            &st,
-            &repo,
-            &source,
-            &cfg.global.staging_dir,
-            engine.as_ref(),
-        )
-    })();
+    let result = pipeline::run_backup(
+        &st,
+        &repo,
+        &source,
+        &cfg.global.staging_dir,
+        engine.as_ref(),
+    );
     match &result {
         Ok(outcome) => {
             let detail = st.run_detail(outcome.run_id).ok().flatten();
