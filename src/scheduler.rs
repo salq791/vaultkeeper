@@ -18,6 +18,10 @@ pub fn verify_jobs(sources: &[(String, String, Option<String>)]) -> Vec<(String,
 
 pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
     let st = store::Store::open(&db_path, crypto::MasterKey::from_env()?)?;
+    let cleared = st.reconcile_stale_running()?;
+    if cleared > 0 {
+        tracing::warn!("cleared {cleared} zombie 'running' row(s) from a previous process");
+    }
     let sources: Vec<(String, String, Option<String>)> = st
         .list_sources()?
         .into_iter()
@@ -131,15 +135,33 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
         }));
     }
 
-    tokio::signal::ctrl_c()
-        .await
-        .context("failed to listen for ctrl-c")?;
-    tracing::info!("ctrl-c received: stopping schedules, waiting for in-flight runs");
+    shutdown_signal().await;
     let _ = shutdown_tx.send(true);
     for h in handles {
         let _ = h.await;
     }
     Ok(())
+}
+
+/// Waits for ctrl-c or, on unix, SIGTERM (what `docker stop` sends). Windows
+/// only has ctrl-c, so the cfg(not(unix)) arm is the one that ever compiles
+/// or runs on this development machine; the unix arm is verified by CI's
+/// ubuntu jobs.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    tracing::info!("shutdown signal received: stopping schedules, waiting for in-flight runs");
 }
 
 #[cfg(test)]

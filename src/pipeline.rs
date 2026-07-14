@@ -62,7 +62,11 @@ pub fn run_backup(
 
     match result {
         Ok((snapshot_id, bytes, None)) => {
-            store.finish_run(run_id, "success", Some(bytes), Some(&snapshot_id), None)?;
+            if let Err(journal_err) =
+                store.finish_run(run_id, "success", Some(bytes), Some(&snapshot_id), None)
+            {
+                tracing::warn!("failed to journal run {run_id} success: {journal_err:#}");
+            }
             Ok(RunOutcome {
                 run_id,
                 snapshot_id: Some(snapshot_id),
@@ -70,13 +74,17 @@ pub fn run_backup(
             })
         }
         Ok((snapshot_id, bytes, Some(prune_err))) => {
-            store.finish_run(
+            if let Err(journal_err) = store.finish_run(
                 run_id,
                 "success_prune_failed",
                 Some(bytes),
                 Some(&snapshot_id),
                 Some(&prune_err),
-            )?;
+            ) {
+                tracing::warn!(
+                    "failed to journal run {run_id} success_prune_failed: {journal_err:#}"
+                );
+            }
             Ok(RunOutcome {
                 run_id,
                 snapshot_id: Some(snapshot_id),

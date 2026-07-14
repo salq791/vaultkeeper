@@ -98,6 +98,7 @@ impl Store {
         conn.execute_batch(MIGRATIONS)?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         Ok(Self { conn, key })
     }
 
@@ -211,6 +212,17 @@ impl Store {
             params![run_id, status, bytes, snapshot_id, detail],
         )?;
         Ok(())
+    }
+
+    /// Marks every 'running' row stale. Called once at daemon boot: the
+    /// daemon owns the database, so any row still 'running' at that moment
+    /// belongs to a process that died without finishing its journal entry.
+    pub fn reconcile_stale_running(&self) -> Result<u64> {
+        let n = self.conn.execute(
+            "UPDATE runs SET status = 'stale', finished_at = datetime('now') WHERE status = 'running'",
+            [],
+        )?;
+        Ok(n as u64)
     }
 
     pub fn run_detail(&self, run_id: i64) -> Result<Option<String>> {
@@ -422,5 +434,41 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, "success");
         assert_eq!(runs[0].snapshot_id.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn reconcile_marks_all_running_rows_stale() {
+        let st = store();
+        let sid = st.add_source(&sample()).unwrap();
+        let _r = st.start_run(sid, "backup").unwrap();
+        assert_eq!(st.reconcile_stale_running().unwrap(), 1);
+        let stale: i64 = st
+            .conn_for_tests()
+            .query_row(
+                "SELECT count(*) FROM runs WHERE status = 'stale'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 1);
+        assert!(
+            st.start_run(sid, "backup").is_ok(),
+            "reconciled source is unblocked"
+        );
+    }
+
+    #[test]
+    fn file_backed_store_uses_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = Store::open(
+            dir.path().join("w.db").to_str().unwrap(),
+            MasterKey::from_hex(K).unwrap(),
+        )
+        .unwrap();
+        let mode: String = st
+            .conn_for_tests()
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
     }
 }
