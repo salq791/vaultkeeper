@@ -129,10 +129,8 @@ impl Engine for PostgresEngine {
         let out_file = ctx.staging_dir.join("db.dump");
         let (argv, env) = pg_dump_invocation(&ctx.settings, &ctx.secrets, &out_file)?;
         let mut cmd = Command::new("pg_dump");
-        cmd.args(&argv)
-            .envs(env)
-            .env_remove("VAULTKEEPER_MASTER_KEY")
-            .env_remove("RESTIC_PASSWORD");
+        cmd.args(&argv).envs(env);
+        super::scrub_child_env(&mut cmd);
         let out =
             crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings))
                 .context("failed to spawn pg_dump (is it installed and on PATH?)")?;
@@ -164,10 +162,8 @@ impl Engine for PostgresEngine {
         let dump_file = payload.join("db.dump");
         let (argv, env) = pg_restore_invocation(target, &dump_file)?;
         let mut cmd = Command::new("pg_restore");
-        cmd.args(&argv)
-            .envs(env)
-            .env_remove("VAULTKEEPER_MASTER_KEY")
-            .env_remove("RESTIC_PASSWORD");
+        cmd.args(&argv).envs(env);
+        super::scrub_child_env(&mut cmd);
         let out =
             crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings))
                 .context("failed to spawn pg_restore (is it installed and on PATH?)")?;
@@ -210,9 +206,8 @@ impl Engine for PostgresEngine {
                 "-d".to_string(),
                 parts.dbname,
             ])
-            .envs(env.clone())
-            .env_remove("VAULTKEEPER_MASTER_KEY")
-            .env_remove("RESTIC_PASSWORD");
+            .envs(env.clone());
+            super::scrub_child_env(&mut cmd);
             let out = crate::util::output_with_timeout(
                 &mut cmd,
                 super::timeout_from_settings(&ctx.settings),
@@ -225,10 +220,8 @@ impl Engine for PostgresEngine {
         // zero objects.
         psql("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")?;
         let mut cmd = Command::new("pg_restore");
-        cmd.args(&argv)
-            .envs(env.clone())
-            .env_remove("VAULTKEEPER_MASTER_KEY")
-            .env_remove("RESTIC_PASSWORD");
+        cmd.args(&argv).envs(env.clone());
+        super::scrub_child_env(&mut cmd);
         let out = crate::util::output_with_timeout(
             &mut cmd,
             super::timeout_from_settings(&ctx.settings),

@@ -257,6 +257,7 @@ fn main() -> Result<()> {
             let sources = st.list_sources()?;
             println!("config ok: staging={}", cfg.global.staging_dir.display());
             println!("db ok: {} sources", sources.len());
+            let mut problems = 0usize;
             for src in &sources {
                 for (label, expr) in [
                     ("schedule", Some(src.schedule.as_str())),
@@ -265,18 +266,21 @@ fn main() -> Result<()> {
                     let Some(expr) = expr else { continue };
                     match schedule::validate(expr) {
                         Ok(()) => println!("{}: {label} ok", src.name),
-                        Err(e) => println!("{}: {label} INVALID: {e}", src.name),
+                        Err(e) => {
+                            println!("{}: {label} INVALID: {e}", src.name);
+                            problems += 1;
+                        }
                     }
                 }
             }
             for tool in ["restic", "pg_dump", "mongodump", "rclone", "supabase"] {
+                let found = tool_on_path(tool);
+                if !found {
+                    problems += 1;
+                }
                 println!(
                     "{tool}: {}",
-                    if tool_on_path(tool) {
-                        "found"
-                    } else {
-                        "MISSING from PATH"
-                    }
+                    if found { "found" } else { "MISSING from PATH" }
                 );
             }
             let mut channels = Vec::new();
@@ -306,6 +310,7 @@ fn main() -> Result<()> {
             } else {
                 println!("verify: {}", scratch.join(", "));
             }
+            anyhow::ensure!(problems == 0, "check-config found {problems} problem(s)");
             Ok(())
         }
         Command::Daemon => {
@@ -323,6 +328,15 @@ fn main() -> Result<()> {
             confirm_remote_overwrite,
         } => {
             let cfg = config::load(&config_path())?;
+            let target = match target {
+                Some(t) => {
+                    eprintln!(
+                        "warning: inline --target exposes the database password to the process table and shell history; prefer VAULTKEEPER_RESTORE_TARGET"
+                    );
+                    Some(t)
+                }
+                None => std::env::var("VAULTKEEPER_RESTORE_TARGET").ok(),
+            };
             exec::execute_restore(
                 &cfg,
                 &db_path(),

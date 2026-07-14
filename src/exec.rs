@@ -110,7 +110,15 @@ pub fn execute_verify(
     let engine = engines::engine_for(&source.engine)?;
     let repo = build_repo(cfg);
     let notifier = Notifier::from_notify(&cfg.notify)?;
-    let run_id = st.start_run(source.id, "verify")?;
+    let run_id = match st.start_run(source.id, "verify") {
+        Ok(id) => id,
+        Err(e) => {
+            if e.to_string().contains("in progress") {
+                let _ = st.record_skip(source.id, "verify", &e.to_string());
+            }
+            return Err(e);
+        }
+    };
 
     let workdir = restore_workdir(&cfg.global.staging_dir, "verify", &source.name);
     let result = (|| -> Result<String> {

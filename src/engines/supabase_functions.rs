@@ -43,9 +43,8 @@ impl Engine for SupabaseFunctionsEngine {
         let mut cmd = Command::new("supabase");
         cmd.args(functions_download_invocation(project_ref))
             .current_dir(&ctx.staging_dir)
-            .env("SUPABASE_ACCESS_TOKEN", token)
-            .env_remove("VAULTKEEPER_MASTER_KEY")
-            .env_remove("RESTIC_PASSWORD");
+            .env("SUPABASE_ACCESS_TOKEN", token);
+        super::scrub_child_env(&mut cmd);
         let out =
             crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings))
                 .context("failed to spawn supabase CLI (is it installed?)")?;

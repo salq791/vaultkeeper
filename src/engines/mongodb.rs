@@ -8,6 +8,13 @@ pub struct MongodbEngine;
 
 /// Naive host extraction for same-host comparison: text between '@' and the
 /// next ':' or '/' or end. Handles both mongodb:// and mongodb+srv:// forms.
+///
+/// Returns `None` for URIs without userinfo (no '@'): this is by design, not
+/// an oversight. The same-host guards that consume this function only need
+/// to catch the credential-bearing case (a real connection string always has
+/// a user:pass@ before the host); a URI with no userinfo has no host to
+/// compare either, so the guard fails open rather than misfiring on
+/// malformed input.
 pub fn uri_host(uri: &str) -> Option<String> {
     let after_at = uri.split('@').nth(1)?;
     let end = after_at.find([':', '/']).unwrap_or(after_at.len());
@@ -63,15 +70,32 @@ pub fn parse_restored_docs(out: &str) -> Option<u64> {
     None
 }
 
+/// Parse mongorestore's "N document(s) failed to restore" line and return N,
+/// or None if the marker is absent.
+pub fn parse_failed_docs(out: &str) -> Option<u64> {
+    for line in out.lines() {
+        if let Some(idx) = line.find(" document(s) failed to restore") {
+            let head = &line[..idx];
+            let digits: String = head
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            let digits: String = digits.chars().rev().collect();
+            return digits.parse().ok();
+        }
+    }
+    None
+}
+
 impl Engine for MongodbEngine {
     fn dump(&self, ctx: &DumpCtx) -> Result<PathBuf> {
         let inv = mongodump_invocation(&ctx.settings, &ctx.secrets, &ctx.staging_dir)?;
         // staging_dir is wiped fresh by the pipeline each run, so create_new cannot collide
         crate::util::write_new_0600(&inv.config_path, inv.config_contents.as_bytes())?;
         let mut cmd = Command::new("mongodump");
-        cmd.args(&inv.argv)
-            .env_remove("VAULTKEEPER_MASTER_KEY")
-            .env_remove("RESTIC_PASSWORD");
+        cmd.args(&inv.argv);
+        super::scrub_child_env(&mut cmd);
         let out =
             crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings));
         let _ = std::fs::remove_file(&inv.config_path);
@@ -116,9 +140,8 @@ impl Engine for MongodbEngine {
             "--drop".to_string(),
             "--dir".to_string(),
             dump_dir.display().to_string(),
-        ])
-        .env_remove("VAULTKEEPER_MASTER_KEY")
-        .env_remove("RESTIC_PASSWORD");
+        ]);
+        super::scrub_child_env(&mut cmd);
         let out =
             crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings));
         let _ = std::fs::remove_file(&config_path);
@@ -161,9 +184,8 @@ impl Engine for MongodbEngine {
             "--drop".to_string(),
             "--dir".to_string(),
             payload.join("dump").display().to_string(),
-        ])
-        .env_remove("VAULTKEEPER_MASTER_KEY")
-        .env_remove("RESTIC_PASSWORD");
+        ]);
+        super::scrub_child_env(&mut cmd);
         let out =
             crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings));
         let _ = std::fs::remove_file(&config_path);
@@ -191,6 +213,12 @@ impl Engine for MongodbEngine {
         let docs =
             parse_restored_docs(&combined).context("could not parse restored document count")?;
         anyhow::ensure!(docs > 0, "verify restored zero documents");
+        if let Some(failed) = parse_failed_docs(&combined) {
+            anyhow::ensure!(
+                failed == 0,
+                "verify mongorestore reported {failed} failed document(s)"
+            );
+        }
         Ok(format!("docs={docs}"))
     }
 }
@@ -313,6 +341,19 @@ mod tests {
         };
         let err = MongodbEngine.verify(&ctx).unwrap_err();
         assert!(err.to_string().contains("refusing"));
+    }
+
+    #[test]
+    fn parses_mongorestore_failed_count() {
+        let out = "55 document(s) restored successfully. 5 document(s) failed to restore.";
+        assert_eq!(parse_failed_docs(out), Some(5));
+        assert_eq!(
+            parse_failed_docs(
+                "55 document(s) restored successfully. 0 document(s) failed to restore."
+            ),
+            Some(0)
+        );
+        assert_eq!(parse_failed_docs("nothing here"), None);
     }
 
     #[test]

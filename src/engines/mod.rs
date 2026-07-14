@@ -71,6 +71,28 @@ pub fn engine_for(kind: &str) -> Result<Box<dyn Engine>> {
     }
 }
 
+/// Env vars scrubbed from every engine child. Restic is the one exception
+/// for the AWS vars: an S3-backed restic repo legitimately needs them.
+pub const SCRUBBED_ENV_VARS: [&str; 6] = [
+    "VAULTKEEPER_MASTER_KEY",
+    "RESTIC_PASSWORD",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+];
+
+/// Strips vaultkeeper's own master key and any restic/AWS credentials from a
+/// child command's inherited environment. Every engine child (pg_dump,
+/// pg_restore, psql, mongodump, mongorestore, rclone, supabase) calls this
+/// after the command is otherwise built, so none of them can read secrets
+/// meant only for restic or vaultkeeper itself.
+pub fn scrub_child_env(cmd: &mut std::process::Command) {
+    for var in SCRUBBED_ENV_VARS {
+        cmd.env_remove(var);
+    }
+}
+
 /// Per-source child process deadline, read from the source's settings JSON
 /// (key `timeout_minutes`); defaults to 60 minutes when absent.
 pub fn timeout_from_settings(settings: &serde_json::Value) -> std::time::Duration {
@@ -129,5 +151,19 @@ mod tests {
             timeout_from_settings(&serde_json::json!({"timeout_minutes": u64::MAX})),
             std::time::Duration::from_secs(u64::MAX)
         );
+    }
+
+    #[test]
+    fn scrub_list_covers_vault_and_aws() {
+        for var in [
+            "VAULTKEEPER_MASTER_KEY",
+            "RESTIC_PASSWORD",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE",
+        ] {
+            assert!(SCRUBBED_ENV_VARS.contains(&var), "{var} must be scrubbed");
+        }
     }
 }

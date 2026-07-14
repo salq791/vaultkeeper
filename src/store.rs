@@ -227,6 +227,17 @@ impl Store {
         Ok(n as u64)
     }
 
+    /// Journals a run that was refused by the concurrency guard so scheduled
+    /// skips are visible in history instead of only in daemon logs.
+    pub fn record_skip(&self, source_id: i64, kind: &str, reason: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO runs (source_id, kind, status, finished_at, detail)
+             VALUES (?1, ?2, 'skipped', datetime('now'), ?3)",
+            params![source_id, kind, reason],
+        )?;
+        Ok(())
+    }
+
     pub fn run_detail(&self, run_id: i64) -> Result<Option<String>> {
         let detail = self.conn.query_row(
             "SELECT detail FROM runs WHERE id = ?1",
@@ -473,6 +484,19 @@ mod tests {
             fresh_status, "running",
             "a fresh run (e.g. manual docker-exec) survives daemon boot"
         );
+    }
+
+    #[test]
+    fn record_skip_writes_finished_skipped_row() {
+        let st = store();
+        let sid = st.add_source(&sample()).unwrap();
+        st.record_skip(sid, "verify", "another run in progress")
+            .unwrap();
+        let runs = st.recent_runs(1).unwrap();
+        assert_eq!(runs[0].status, "skipped");
+        assert_eq!(runs[0].kind, "verify");
+        assert!(runs[0].finished_at.is_some());
+        assert!(runs[0].detail.as_deref().unwrap().contains("in progress"));
     }
 
     #[test]
