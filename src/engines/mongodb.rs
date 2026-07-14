@@ -44,27 +44,17 @@ pub fn mongodump_invocation(
 impl Engine for MongodbEngine {
     fn dump(&self, ctx: &DumpCtx) -> Result<PathBuf> {
         let inv = mongodump_invocation(&ctx.settings, &ctx.secrets, &ctx.staging_dir)?;
-        {
-            use std::io::Write;
-            let mut opts = std::fs::OpenOptions::new();
-            // staging_dir is wiped fresh by the pipeline each run, so create_new cannot collide
-            opts.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            let mut f = opts
-                .open(&inv.config_path)
-                .context("failed to create mongodump config file")?;
-            f.write_all(inv.config_contents.as_bytes())?;
-        }
+        // staging_dir is wiped fresh by the pipeline each run, so create_new cannot collide
+        crate::util::write_new_0600(&inv.config_path, inv.config_contents.as_bytes())?;
         let out = Command::new("mongodump")
             .args(&inv.argv)
             .env_remove("VAULTKEEPER_MASTER_KEY")
             .env_remove("RESTIC_PASSWORD")
             .output();
         let _ = std::fs::remove_file(&inv.config_path);
+        if inv.config_path.exists() {
+            bail!("mongodump config file could not be removed; aborting so credentials are not snapshotted");
+        }
         let out =
             out.context("failed to spawn mongodump (is mongodb-database-tools installed?)")?;
         if !out.status.success() {

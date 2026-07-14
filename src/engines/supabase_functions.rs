@@ -68,22 +68,9 @@ impl Engine for SupabaseFunctionsEngine {
             bail!("auth config request returned HTTP {}", resp.status());
         }
         let body = resp.bytes().context("failed to read auth config body")?;
-        {
-            use std::io::Write;
-            let mut opts = std::fs::OpenOptions::new();
-            // staging_dir is wiped fresh by the pipeline each run, so create_new cannot collide
-            opts.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            let mut f = opts
-                .open(ctx.staging_dir.join("auth-config.json"))
-                .context("failed to create auth config file")?;
-            f.write_all(&body)
-                .context("failed to write auth config file")?;
-        }
+        // staging_dir is wiped fresh by the pipeline each run, so create_new cannot collide
+        // the auth config export can contain SMTP and OAuth provider secrets, hence 0600
+        crate::util::write_new_0600(&ctx.staging_dir.join("auth-config.json"), &body)?;
         Ok(ctx.staging_dir.clone())
     }
 }
