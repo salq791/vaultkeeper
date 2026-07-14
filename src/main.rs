@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
 
+#[allow(dead_code)]
+mod config;
+
 #[derive(Parser)]
 #[command(name = "vaultkeeper", version, about)]
 struct Cli {
