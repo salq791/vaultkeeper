@@ -1,3 +1,4 @@
+pub mod mongodb;
 pub mod postgres;
 
 use anyhow::{bail, Result};
