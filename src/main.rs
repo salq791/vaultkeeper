@@ -8,6 +8,7 @@ mod restic;
 mod schedule;
 mod scheduler;
 mod store;
+mod tui;
 mod types;
 mod util;
 
@@ -62,6 +63,8 @@ enum Command {
         #[arg(long)]
         source: String,
     },
+    /// Launch the interactive terminal UI
+    Tui,
 }
 
 #[derive(Subcommand)]
@@ -355,6 +358,10 @@ fn main() -> Result<()> {
                 None => println!("verify of {source}: {}", out.status),
             }
             Ok(())
+        }
+        Command::Tui => {
+            let cfg = config::load(&config_path())?;
+            tui::run(cfg, db_path())
         }
     }
 }

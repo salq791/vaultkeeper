@@ -38,9 +38,6 @@ pub struct SourceRow {
 /// Decryption-free projection of a source row for the TUI's source lists:
 /// no `secrets` field exists on this type, so secret material can never end
 /// up in TUI screen state by accident.
-// Consumed by plan-6 TUI tasks (Task 3's Sources/Dashboard state and the
-// Sources tab list).
-#[allow(dead_code)]
 pub struct SourceMeta {
     pub id: i64,
     pub name: String,
@@ -50,14 +47,16 @@ pub struct SourceMeta {
     pub retention: Retention,
     pub healthchecks_uuid: Option<String>,
     pub verify_healthchecks_uuid: Option<String>,
+    // Raw per-engine JSON (host/port/etc): the Sources tab shows every other
+    // field but not this one (no generic tabular rendering for arbitrary
+    // JSON); Task 5's source-edit form is the field's real consumer.
+    #[allow(dead_code)]
     pub settings: serde_json::Value,
     pub enabled: bool,
 }
 
 /// A run joined with its source name, for history display without a second
 /// lookup per row.
-// Consumed by plan-6 TUI tasks (Task 3's History tab state).
-#[allow(dead_code)]
 pub struct RunView {
     pub source: String,
     pub kind: String,
@@ -213,9 +212,6 @@ impl Store {
     /// Lists sources without ever touching or decrypting `secret_blob`: the
     /// column is not even in the SELECT list, so secret material cannot leak
     /// into TUI screen state through this path.
-    // Consumed by plan-6 TUI tasks (data.rs refresh powering the Sources and
-    // Dashboard tabs).
-    #[allow(dead_code)]
     pub fn list_sources_meta(&self) -> Result<Vec<SourceMeta>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, engine, schedule, verify_schedule, retention_json,
@@ -361,7 +357,6 @@ impl Store {
     }
 
     /// Counts the number of rows with status = 'running'.
-    #[allow(dead_code)]
     pub fn count_running(&self) -> Result<u64> {
         let n: i64 = self.conn.query_row(
             "SELECT count(*) FROM runs WHERE status = 'running'",
@@ -384,8 +379,6 @@ impl Store {
 
     /// Runs joined with their source name, newest first, for history display
     /// without a per-row source lookup.
-    // Consumed by plan-6 TUI tasks (data.rs refresh powering the History tab).
-    #[allow(dead_code)]
     pub fn recent_runs_view(&self, limit: i64) -> Result<Vec<RunView>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.name, r.kind, r.status, r.started_at, r.finished_at, r.detail
