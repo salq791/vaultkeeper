@@ -21,14 +21,16 @@ Edge Functions live outside Postgres. Vaultkeeper backs up all of it:
 Everything lands in a restic repository: deduplication, encryption,
 retention pruning, append-only capability.
 
-## Roadmap to v1
+## Features
 
-- [x] Design spec
-- [x] Core backup path (Postgres -> restic)
-- [x] MongoDB, Supabase Storage, Supabase Edge Functions engines
-- [x] Built-in scheduler, healthchecks.io / webhook / SES alerting
-- [x] Restore command + scheduled restore verification
-- [ ] Terminal UI (ratatui) with encrypted credential management
+- Postgres (vanilla and Supabase), MongoDB, Supabase Storage, and Supabase Edge Functions backups on cron schedules
+- Restic repositories (BorgBase or any restic backend): deduplication, encryption, retention pruning
+- Restore with same-host guards and snapshot selection; storage restores require explicit overwrite confirmation
+- Scheduled restore verification into scratch databases with row counts journaled
+- healthchecks.io dead-man switch, webhook, and SES email alerting
+- Hard timeouts on every child process; graceful SIGTERM shutdown; per-source concurrency guard
+- Credentials encrypted at rest (ChaCha20-Poly1305, master key from env), entered via stdin or the masked TUI form, never argv
+- Terminal UI for the whole loop: dashboard, history, sources, snapshots, restores
 
 ## Deploy
 
@@ -48,6 +50,31 @@ Prebuilt image: `ghcr.io/salq791/vaultkeeper:latest` (linux/amd64).
 5. `docker compose exec vaultkeeper vaultkeeper check-config` exits nonzero if anything is misconfigured.
 
 Restores: `docker compose exec vaultkeeper vaultkeeper restore --source my-db` (target via the VAULTKEEPER_RESTORE_TARGET environment variable; same-host restores require --force-same-host).
+
+## Terminal UI
+
+The whole operational loop, dashboard, history, source management, snapshot browsing, and restore, is also available as a full-screen terminal UI, running inside the same container:
+
+    docker compose exec -it vaultkeeper vaultkeeper tui
+
+| Key | Action |
+| --- | --- |
+| Tab / Shift+Tab | Switch tabs |
+| Up / Down | Move selection |
+| r | Run backup on the selected source |
+| v | Run verify on the selected source |
+| a | Add a source (Sources tab) |
+| e | Edit the selected source (Sources tab) |
+| d | Enable/disable the selected source (Sources tab) |
+| Enter | Load snapshots for the selected source (Snapshots tab) |
+| R | Restore the selected snapshot (Snapshots tab) |
+| ? | Toggle this help |
+| q | Quit |
+
+Notes:
+
+- Restores started from the TUI go through the same guards as the CLI: a same-host target is refused, and a storage restore that would overwrite the live bucket is refused. Neither guard has a TUI override; use `vaultkeeper restore --force-same-host` or `--confirm-remote-overwrite` on the CLI for those cases.
+- The add/edit source form enters credentials masked (shown as asterisks while typing) and only ever writes them out as an encrypted blob. The secrets field is write-only: editing a source never re-displays its stored credentials, and leaving it blank keeps the existing ones.
 
 ## License
 
