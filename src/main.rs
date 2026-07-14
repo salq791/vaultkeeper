@@ -1,6 +1,7 @@
 mod config;
 mod crypto;
 mod engines;
+mod notify;
 mod pipeline;
 mod restic;
 mod schedule;

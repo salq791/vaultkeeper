@@ -27,7 +27,7 @@ pub struct Notify {
     pub ses: Option<Ses>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct Ses {
     pub region: String,
