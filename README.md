@@ -30,6 +30,25 @@ retention pruning, append-only capability.
 - [x] Restore command + scheduled restore verification
 - [ ] Terminal UI (ratatui) with encrypted credential management
 
+## Deploy
+
+Prebuilt image: `ghcr.io/salq791/vaultkeeper:latest` (linux/amd64).
+
+1. Copy `config.example.toml` to `config.toml` and `.env.example` to `.env`, then fill in your restic repository, its password, and your master key (`openssl rand -hex 32`).
+2. Start the daemon: `docker compose up -d`
+3. Add sources (secrets via stdin so they never touch your shell history):
+
+    echo '{"password":"..."}' | docker compose exec -T vaultkeeper \
+      vaultkeeper source add --name my-db --engine postgres \
+      --schedule "0 2 * * *" \
+      --settings-json '{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}' \
+      --secrets-json -
+
+4. Scheduled restore verification needs the scratch databases: `docker compose --profile verify up -d`, then add `--verify-schedule "0 5 * * 0"` to your sources.
+5. `docker compose exec vaultkeeper vaultkeeper check-config` exits nonzero if anything is misconfigured.
+
+Restores: `docker compose exec vaultkeeper vaultkeeper restore --source my-db` (target via the VAULTKEEPER_RESTORE_TARGET environment variable; same-host restores require --force-same-host).
+
 ## License
 
 MIT or Apache-2.0, at your option.
