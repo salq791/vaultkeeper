@@ -1,6 +1,6 @@
 use crate::crypto::MasterKey;
 use crate::types::Retention;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
@@ -74,6 +74,26 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 "#;
 
+/// Validates that `name` is safe to use as both a staging directory path
+/// component and a restic tag: first char ASCII alphanumeric, remaining
+/// chars ASCII alphanumeric, `-`, or `_`.
+fn validate_source_name(name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let valid = match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        bail!(
+            "invalid source name '{name}': use only letters, digits, '-' and '_', starting with a letter or digit"
+        );
+    }
+}
+
 impl Store {
     pub fn open(path: &str, key: MasterKey) -> Result<Self> {
         let conn = Connection::open(path).with_context(|| format!("cannot open db {path}"))?;
@@ -82,6 +102,7 @@ impl Store {
     }
 
     pub fn add_source(&self, s: &NewSource) -> Result<i64> {
+        validate_source_name(&s.name)?;
         let blob = self.key.seal(serde_json::to_vec(&s.secrets)?.as_slice());
         self.conn.execute(
             "INSERT INTO sources (name, engine, schedule, verify_schedule, retention_json,
@@ -235,6 +256,47 @@ mod tests {
         let st = store();
         st.add_source(&sample()).unwrap();
         assert!(st.add_source(&sample()).is_err());
+    }
+
+    #[test]
+    fn rejects_dotdot_name() {
+        let st = store();
+        let mut s = sample();
+        s.name = "..".into();
+        let err = st.add_source(&s).unwrap_err();
+        assert!(err.to_string().contains("invalid source name"));
+    }
+
+    #[test]
+    fn rejects_name_with_slash() {
+        let st = store();
+        let mut s = sample();
+        s.name = "a/b".into();
+        assert!(st.add_source(&s).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_name() {
+        let st = store();
+        let mut s = sample();
+        s.name = "".into();
+        assert!(st.add_source(&s).is_err());
+    }
+
+    #[test]
+    fn rejects_name_with_comma() {
+        let st = store();
+        let mut s = sample();
+        s.name = "a,b".into();
+        assert!(st.add_source(&s).is_err());
+    }
+
+    #[test]
+    fn accepts_hyphen_underscore_name() {
+        let st = store();
+        let mut s = sample();
+        s.name = "acme-db_1".into();
+        assert!(st.add_source(&s).is_ok());
     }
 
     #[test]

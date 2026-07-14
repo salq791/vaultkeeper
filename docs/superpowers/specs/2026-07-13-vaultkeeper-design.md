@@ -85,8 +85,8 @@ healthchecks_base = "https://hc-ping.com"
 webhook_url = "${SLACK_WEBHOOK}"          # optional
 [notify.ses]
 region = "us-east-1"
-from = "backups@tradelineconsulting.com"
-to = ["sal@tradelineconsulting.com"]
+from = "backups@example.com"
+to = ["admin@example.com"]
 ```
 
 ### SQLite schema (initial)

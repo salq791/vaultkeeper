@@ -76,16 +76,19 @@ impl ResticCli {
             .arg(&self.repo)
             .args(args)
             .env("RESTIC_PASSWORD", &self.password)
+            .env_remove("VAULTKEEPER_MASTER_KEY")
             .output()
             .with_context(|| format!("failed to spawn {}", self.bin))?;
         if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let mut truncated: String = stderr.chars().take(2000).collect();
+            if stderr.chars().count() > 2000 {
+                truncated.push_str(" ...[truncated]");
+            }
             bail!(
                 "restic {} failed: {}",
                 args.first().map(String::as_str).unwrap_or(""),
-                String::from_utf8_lossy(&out.stderr)
-                    .chars()
-                    .take(2000)
-                    .collect::<String>()
+                truncated
             );
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -94,11 +97,15 @@ impl ResticCli {
 
 impl Repo for ResticCli {
     fn ensure_init(&self) -> Result<()> {
-        let probe = self.run(&["cat".into(), "config".into()]);
-        if probe.is_ok() {
-            return Ok(());
+        match self.run(&["cat".into(), "config".into()]) {
+            Ok(_) => Ok(()),
+            Err(probe_err) => match self.run(&["init".into()]) {
+                Ok(_) => Ok(()),
+                Err(init_err) => Err(init_err.context(format!(
+                    "restic init failed after repo probe also failed: {probe_err:#}"
+                ))),
+            },
         }
-        self.run(&["init".into()]).map(|_| ())
     }
 
     fn backup(&self, path: &Path, tag: &str) -> Result<BackupSummary> {

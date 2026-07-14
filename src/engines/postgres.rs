@@ -53,6 +53,8 @@ impl Engine for PostgresEngine {
         let out = Command::new("pg_dump")
             .args(&argv)
             .envs(env)
+            .env_remove("VAULTKEEPER_MASTER_KEY")
+            .env_remove("RESTIC_PASSWORD")
             .output()
             .context("failed to spawn pg_dump (is it installed and on PATH?)")?;
         if !out.status.success() {
