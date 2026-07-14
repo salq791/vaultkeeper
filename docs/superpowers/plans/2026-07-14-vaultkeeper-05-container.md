@@ -31,7 +31,7 @@
 
 **Interfaces:**
 - Consumes: existing daemon/store/pipeline.
-- Produces: `store::Store::reconcile_stale_running(&self) -> anyhow::Result<u64>` (marks EVERY `running` row `stale` with finished_at, returns count; the daemon owns the DB at boot, so anything still `running` is a crashed process's zombie); daemon shutdown triggers on SIGTERM as well as ctrl-c (unix), so `docker stop` is graceful; `Store::open` sets `PRAGMA journal_mode=WAL` on file-backed databases; pipeline success and success_prune_failed arms warn-guard `finish_run` failures instead of `?` (a real snapshot must never be reported as run failure because the journal write failed; mirrors the failed arm's existing guard).
+- Produces: `store::Store::reconcile_stale_running(&self) -> anyhow::Result<u64>` (marks `running` rows older than 24 hours `stale` with finished_at, returns count; fresh running rows are left alone because a manual docker-exec run may legitimately be in flight across a daemon restart); daemon shutdown triggers on SIGTERM as well as ctrl-c (unix), so `docker stop` is graceful; `Store::open` sets `PRAGMA journal_mode=WAL` on file-backed databases; pipeline success and success_prune_failed arms warn-guard `finish_run` failures instead of `?` (a real snapshot must never be reported as run failure because the journal write failed; mirrors the failed arm's existing guard).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -39,17 +39,29 @@
 
 ```rust
     #[test]
-    fn reconcile_marks_all_running_rows_stale() {
+    fn reconcile_clears_only_old_zombie_rows() {
         let st = store();
         let sid = st.add_source(&sample()).unwrap();
-        let _r = st.start_run(sid, "backup").unwrap();
+        // Fresh run first: start_run itself clears >24h rows for the source,
+        // so the zombie is inserted afterward for reconcile alone to see.
+        let fresh = st.start_run(sid, "backup").unwrap();
+        st.conn_for_tests()
+            .execute(
+                "INSERT INTO runs (source_id, kind, status, started_at) VALUES (?1, 'backup', 'running', datetime('now', '-25 hours'))",
+                rusqlite::params![sid],
+            )
+            .unwrap();
         assert_eq!(st.reconcile_stale_running().unwrap(), 1);
         let stale: i64 = st
             .conn_for_tests()
             .query_row("SELECT count(*) FROM runs WHERE status = 'stale'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(stale, 1);
-        assert!(st.start_run(sid, "backup").is_ok(), "reconciled source is unblocked");
+        let fresh_status: String = st
+            .conn_for_tests()
+            .query_row("SELECT status FROM runs WHERE id = ?1", rusqlite::params![fresh], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fresh_status, "running", "a fresh run (e.g. manual docker-exec) survives daemon boot");
     }
 
     #[test]
@@ -74,12 +86,14 @@ Expected: compile error, `reconcile_stale_running` missing; WAL test fails (jour
 `src/store.rs`:
 
 ```rust
-    /// Marks every 'running' row stale. Called once at daemon boot: the
-    /// daemon owns the database, so any row still 'running' at that moment
-    /// belongs to a process that died without finishing its journal entry.
+    /// Marks 'running' rows older than 24 hours stale at daemon boot. Fresh
+    /// running rows are left alone: a manual docker-exec run may legitimately
+    /// be in flight across a daemon restart, and rows it abandons clear via
+    /// the same 24h bound in start_run.
     pub fn reconcile_stale_running(&self) -> Result<u64> {
         let n = self.conn.execute(
-            "UPDATE runs SET status = 'stale', finished_at = datetime('now') WHERE status = 'running'",
+            "UPDATE runs SET status = 'stale', finished_at = datetime('now')
+             WHERE status = 'running' AND started_at <= datetime('now', '-24 hours')",
             [],
         )?;
         Ok(n as u64)
@@ -97,7 +111,9 @@ In `Store::open`, after the busy_timeout line (the pragma returns a row, so use 
 ```rust
     let cleared = st.reconcile_stale_running()?;
     if cleared > 0 {
-        tracing::warn!("cleared {cleared} zombie 'running' row(s) from a previous process");
+        tracing::warn!(
+            "cleared {cleared} zombie 'running' row(s) older than 24h from a previous process"
+        );
     }
 ```
 

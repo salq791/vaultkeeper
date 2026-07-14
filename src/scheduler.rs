@@ -20,7 +20,9 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
     let st = store::Store::open(&db_path, crypto::MasterKey::from_env()?)?;
     let cleared = st.reconcile_stale_running()?;
     if cleared > 0 {
-        tracing::warn!("cleared {cleared} zombie 'running' row(s) from a previous process");
+        tracing::warn!(
+            "cleared {cleared} zombie 'running' row(s) older than 24h from a previous process"
+        );
     }
     let sources: Vec<(String, String, Option<String>)> = st
         .list_sources()?
