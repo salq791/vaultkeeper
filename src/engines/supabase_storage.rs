@@ -6,10 +6,8 @@ use std::process::Command;
 
 type RcloneInvocation = (Vec<String>, Vec<(String, String)>);
 
-#[allow(dead_code)]
 pub struct SupabaseStorageEngine;
 
-#[allow(dead_code)]
 pub fn rclone_invocation(
     settings: &serde_json::Value,
     secrets: &HashMap<String, String>,

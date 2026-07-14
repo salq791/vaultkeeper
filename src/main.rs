@@ -208,7 +208,7 @@ fn main() -> Result<()> {
             let sources = st.list_sources()?;
             println!("config ok: staging={}", cfg.global.staging_dir.display());
             println!("db ok: {} sources", sources.len());
-            for tool in ["restic", "pg_dump"] {
+            for tool in ["restic", "pg_dump", "mongodump", "rclone", "supabase"] {
                 println!(
                     "{tool}: {}",
                     if tool_on_path(tool) {

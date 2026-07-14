@@ -4,26 +4,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[allow(dead_code)]
 pub struct MongodbEngine;
 
 // No Debug derive: config_contents carries the raw secret uri, and a Debug
 // impl would let any future {:?} or dbg!() leak credentials into logs.
-//
-// The per-field allows are still required: dump() reads all three fields,
-// but until Task 6 wires MongodbEngine into the registry the whole impl is
-// dead code, so rustc does not count those reads (verified by removing the
-// allows: the "fields are never read" warning fires).
 pub struct MongoInvocation {
-    #[allow(dead_code)]
     pub argv: Vec<String>,
-    #[allow(dead_code)]
     pub config_path: PathBuf,
-    #[allow(dead_code)]
     pub config_contents: String,
 }
 
-#[allow(dead_code)]
 pub fn mongodump_invocation(
     settings: &serde_json::Value,
     secrets: &HashMap<String, String>,
@@ -57,6 +47,7 @@ impl Engine for MongodbEngine {
         {
             use std::io::Write;
             let mut opts = std::fs::OpenOptions::new();
+            // staging_dir is wiped fresh by the pipeline each run, so create_new cannot collide
             opts.write(true).create_new(true);
             #[cfg(unix)]
             {

@@ -9,10 +9,9 @@ use std::path::PathBuf;
 
 pub struct DumpCtx {
     pub staging_dir: PathBuf,
-    /// Persistent per-source mirror directory; not yet read by any built-in
-    /// engine, but available for engines that keep a reusable local mirror
-    /// across runs instead of re-dumping from scratch each time.
-    #[allow(dead_code)]
+    /// Persistent per-source mirror directory; read by engines that keep a
+    /// reusable local mirror across runs instead of re-dumping from scratch
+    /// each time (e.g. supabase_storage's rclone sync target).
     pub mirror_root: PathBuf,
     pub settings: serde_json::Value,
     pub secrets: HashMap<String, String>,
@@ -26,6 +25,9 @@ pub trait Engine {
 pub fn engine_for(kind: &str) -> Result<Box<dyn Engine>> {
     match kind {
         "postgres" => Ok(Box::new(postgres::PostgresEngine)),
+        "mongodb" => Ok(Box::new(mongodb::MongodbEngine)),
+        "supabase_storage" => Ok(Box::new(supabase_storage::SupabaseStorageEngine)),
+        "supabase_functions" => Ok(Box::new(supabase_functions::SupabaseFunctionsEngine)),
         other => bail!("unknown engine kind: {other}"),
     }
 }
@@ -42,5 +44,17 @@ mod tests {
     #[test]
     fn postgres_engine_resolves() {
         assert!(engine_for("postgres").is_ok());
+    }
+
+    #[test]
+    fn all_engines_resolve() {
+        for kind in [
+            "postgres",
+            "mongodb",
+            "supabase_storage",
+            "supabase_functions",
+        ] {
+            assert!(engine_for(kind).is_ok(), "{kind} should resolve");
+        }
     }
 }

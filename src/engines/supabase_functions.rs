@@ -3,10 +3,8 @@ use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
 
-#[allow(dead_code)]
 pub struct SupabaseFunctionsEngine;
 
-#[allow(dead_code)]
 pub fn functions_download_invocation(project_ref: &str) -> Vec<String> {
     vec![
         "functions".to_string(),
@@ -17,7 +15,6 @@ pub fn functions_download_invocation(project_ref: &str) -> Vec<String> {
     ]
 }
 
-#[allow(dead_code)]
 pub fn auth_config_url(api_base: &str, project_ref: &str) -> String {
     format!(
         "{}/v1/projects/{}/config/auth",
@@ -74,6 +71,7 @@ impl Engine for SupabaseFunctionsEngine {
         {
             use std::io::Write;
             let mut opts = std::fs::OpenOptions::new();
+            // staging_dir is wiped fresh by the pipeline each run, so create_new cannot collide
             opts.write(true).create_new(true);
             #[cfg(unix)]
             {
@@ -83,7 +81,8 @@ impl Engine for SupabaseFunctionsEngine {
             let mut f = opts
                 .open(ctx.staging_dir.join("auth-config.json"))
                 .context("failed to create auth config file")?;
-            f.write_all(&body)?;
+            f.write_all(&body)
+                .context("failed to write auth config file")?;
         }
         Ok(ctx.staging_dir.clone())
     }
