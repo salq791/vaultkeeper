@@ -67,7 +67,7 @@ mod tests {
     const SAMPLE: &str = r#"
 [global]
 staging_dir = "/staging"
-restic_repo = "sftp:demo@demo.repo.borgbase.com:vk"
+restic_repo = "sftp:demo@demo.repo.example.com:vk"
 restic_password = "${RESTIC_PASSWORD}"
 
 [notify]
