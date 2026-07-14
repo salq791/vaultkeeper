@@ -7,7 +7,13 @@ use std::process::Command;
 #[allow(dead_code)]
 pub struct MongodbEngine;
 
-#[derive(Debug)]
+// No Debug derive: config_contents carries the raw secret uri, and a Debug
+// impl would let any future {:?} or dbg!() leak credentials into logs.
+//
+// The per-field allows are still required: dump() reads all three fields,
+// but until Task 6 wires MongodbEngine into the registry the whole impl is
+// dead code, so rustc does not count those reads (verified by removing the
+// allows: the "fields are never read" warning fires).
 pub struct MongoInvocation {
     #[allow(dead_code)]
     pub argv: Vec<String>,
@@ -135,8 +141,14 @@ mod tests {
 
     #[test]
     fn missing_uri_names_the_key() {
-        let err = mongodump_invocation(&serde_json::json!({}), &HashMap::new(), Path::new("/s"))
-            .unwrap_err();
+        // match instead of unwrap_err: unwrap_err requires the Ok type to impl
+        // Debug, and MongoInvocation deliberately does not (config_contents
+        // carries the secret uri, so a Debug impl would risk leaking it).
+        let err =
+            match mongodump_invocation(&serde_json::json!({}), &HashMap::new(), Path::new("/s")) {
+                Ok(_) => panic!("expected missing 'uri' to be an error"),
+                Err(e) => e,
+            };
         assert!(err.to_string().contains("uri"));
     }
 }
