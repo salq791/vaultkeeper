@@ -89,8 +89,6 @@ pub enum Command {
     #[allow(dead_code)]
     Refresh,
     Quit,
-    // Consumed by plan-6 Task 4 (Enter on the Snapshots tab).
-    #[allow(dead_code)]
     LoadSnapshots(String),
     RunBackup(String),
     RunVerify(String),
@@ -238,6 +236,7 @@ impl App {
             }
             KeyCode::Char('r') => self.run_action(false),
             KeyCode::Char('v') => self.run_action(true),
+            KeyCode::Enter => self.enter_action(),
             _ => None,
         }
     }
@@ -272,6 +271,23 @@ impl App {
         } else {
             Command::RunBackup(name)
         })
+    }
+
+    /// Enter on the Snapshots tab loads the currently selected source's
+    /// snapshot list (the selection persists across tabs, same as
+    /// `run_action`'s use of `selected_source`). Skips reissuing the command
+    /// when `app.snapshots_for` already names this source, so repeatedly
+    /// pressing Enter doesn't respawn the load worker for data already on
+    /// screen.
+    fn enter_action(&self) -> Option<Command> {
+        if !matches!(self.tab, Tab::Snapshots) {
+            return None;
+        }
+        let name = self.selected_source()?.name.clone();
+        if self.snapshots_for.as_deref() == Some(name.as_str()) {
+            return None;
+        }
+        Some(Command::LoadSnapshots(name))
     }
 }
 
@@ -353,6 +369,34 @@ pub(crate) mod tests {
         assert_eq!(status_color("success_prune_failed"), Color::Yellow);
         assert_eq!(status_color("verify_passed"), Color::Cyan);
         assert_eq!(status_color("some_future_status"), Color::Gray);
+    }
+
+    #[test]
+    fn enter_on_snapshots_tab_loads_selected_source() {
+        let mut app = App::new();
+        app.sources = vec![meta("a-db")];
+        app.tab = Tab::Snapshots;
+        match app.handle_key(KeyEvent::from(KeyCode::Enter)) {
+            Some(Command::LoadSnapshots(n)) => assert_eq!(n, "a-db"),
+            other => panic!("expected LoadSnapshots, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_on_snapshots_tab_skips_reload_when_already_loaded() {
+        let mut app = App::new();
+        app.sources = vec![meta("a-db")];
+        app.tab = Tab::Snapshots;
+        app.snapshots_for = Some("a-db".to_string());
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Enter)).is_none());
+    }
+
+    #[test]
+    fn enter_key_outside_snapshots_tab_is_noop() {
+        let mut app = App::new();
+        app.sources = vec![meta("a-db")];
+        assert!(matches!(app.tab, Tab::Dashboard));
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Enter)).is_none());
     }
 
     #[test]

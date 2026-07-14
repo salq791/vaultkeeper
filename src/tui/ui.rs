@@ -233,9 +233,16 @@ fn render_sources(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(table, area, &mut state);
 }
 
-/// Placeholder body: `app.snapshots` is only ever populated once Task 4
-/// wires `Command::LoadSnapshots` through a worker; this task renders
-/// whatever is already in state (empty, absent a load).
+/// First 8 characters of a restic snapshot id (its usual short form).
+/// Char-based rather than a byte slice so this never panics on an id
+/// shorter than 8 bytes.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// `app.snapshots` is populated by `Command::LoadSnapshots` dispatching to
+/// `DataHub::load_snapshots`, which sorts newest first; this just renders
+/// whatever's currently in state (empty until that load completes).
 fn render_snapshots(f: &mut Frame, app: &App, area: Rect) {
     let header =
         Row::new(vec!["ID", "Time", "Tags"]).style(Style::default().add_modifier(Modifier::BOLD));
@@ -244,7 +251,7 @@ fn render_snapshots(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|s| {
             Row::new(vec![
-                Cell::from(s.id.clone()),
+                Cell::from(short_id(&s.id)),
                 Cell::from(s.time.clone()),
                 Cell::from(s.tags.join(",")),
             ])
@@ -269,8 +276,15 @@ fn render_snapshots(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(table, area, &mut state);
 }
 
+/// Busy labels (in-flight backup/verify/snapshot loads) take priority over
+/// the last status message so an in-progress action stays visible until it
+/// (or an unrelated failure, which clears `busy` too) resolves; falls back
+/// to the keybinding hint when nothing is busy and no status has been set
+/// yet.
 fn render_status_line(f: &mut Frame, app: &App, area: Rect) {
-    let text = if app.status_line.is_empty() {
+    let text = if !app.busy.is_empty() {
+        format!("busy: {}", app.busy.join(", "))
+    } else if app.status_line.is_empty() {
         "q: quit  Tab: next  Shift+Tab: prev  Up/Down: select  r: backup  v: verify  ?: help"
             .to_string()
     } else {
@@ -329,5 +343,74 @@ mod tests {
         term.draw(|f| render(f, &app)).unwrap();
         let text = format!("{:?}", term.backend().buffer());
         assert!(text.contains("render-me"));
+    }
+
+    #[test]
+    fn short_id_takes_first_eight_chars() {
+        assert_eq!(short_id("0123456789abcdef"), "01234567");
+        assert_eq!(short_id("abc"), "abc");
+    }
+
+    #[test]
+    fn snapshots_tab_renders_short_id_time_and_tags() {
+        let mut app = crate::tui::state::App::new();
+        app.tab = Tab::Snapshots;
+        app.snapshots_for = Some("acme-db".to_string());
+        app.snapshots = vec![crate::restic::Snapshot {
+            id: "0123456789abcdef0123456789abcdef".to_string(),
+            time: "2026-07-13T22:00:00Z".to_string(),
+            tags: vec!["source=acme-db".to_string()],
+        }];
+        let backend = TestBackend::new(100, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render(f, &app)).unwrap();
+        let text = format!("{:?}", term.backend().buffer());
+        assert!(text.contains("01234567"));
+        assert!(!text.contains("0123456789abcdef0123456789abcdef"));
+        assert!(text.contains("2026-07-13T22:00:00Z"));
+        assert!(text.contains("source=acme-db"));
+    }
+
+    #[test]
+    fn status_line_shows_busy_labels_over_status_text() {
+        let mut app = crate::tui::state::App::new();
+        app.busy = vec!["backup acme-db".to_string()];
+        app.status_line = "done: verify other-db".to_string();
+        let backend = TestBackend::new(100, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render(f, &app)).unwrap();
+        let text = format!("{:?}", term.backend().buffer());
+        assert!(text.contains("busy: backup acme-db"));
+    }
+
+    #[test]
+    fn dashboard_running_status_renders_gray() {
+        let mut app = crate::tui::state::App::new();
+        app.sources = vec![crate::tui::state::tests::meta("run-me")];
+        app.runs = vec![crate::store::RunView {
+            source: "run-me".to_string(),
+            kind: "backup".to_string(),
+            status: "running".to_string(),
+            started_at: "2026-07-13T00:00:00Z".to_string(),
+            finished_at: None,
+            detail: None,
+        }];
+        let backend = TestBackend::new(100, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        let mut found = false;
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            if let Some(idx) = row.find("running") {
+                assert_eq!(buf[(idx as u16, y)].fg, Color::Gray);
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "expected 'running' status text in the dashboard render"
+        );
     }
 }
