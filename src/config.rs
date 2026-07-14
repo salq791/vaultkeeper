@@ -15,6 +15,8 @@ pub struct Global {
     pub staging_dir: PathBuf,
     pub restic_repo: String,
     pub restic_password: String,
+    #[serde(default)]
+    pub restic_timeout_minutes: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -72,9 +74,17 @@ mod tests {
 staging_dir = "/staging"
 restic_repo = "sftp:demo@demo.repo.example.com:vk"
 restic_password = "${RESTIC_PASSWORD}"
+restic_timeout_minutes = 300
 
 [notify]
 healthchecks_base = "https://hc-ping.com"
+"#;
+
+    const SAMPLE_MINIMAL: &str = r#"
+[global]
+staging_dir = "/staging"
+restic_repo = "sftp:demo@demo.repo.example.com:vk"
+restic_password = "${RESTIC_PASSWORD}"
 "#;
 
     fn lookup(k: &str) -> Option<String> {
@@ -89,6 +99,7 @@ healthchecks_base = "https://hc-ping.com"
         let cfg = load_from_str(SAMPLE, &lookup).unwrap();
         assert_eq!(cfg.global.restic_password, "s3cret");
         assert_eq!(cfg.global.staging_dir.to_str().unwrap(), "/staging");
+        assert_eq!(cfg.global.restic_timeout_minutes, Some(300));
         assert_eq!(
             cfg.notify.healthchecks_base.as_deref(),
             Some("https://hc-ping.com")
@@ -100,5 +111,11 @@ healthchecks_base = "https://hc-ping.com"
     fn missing_env_var_names_the_variable() {
         let err = load_from_str(SAMPLE, &|_| None).unwrap_err();
         assert!(err.to_string().contains("RESTIC_PASSWORD"));
+    }
+
+    #[test]
+    fn restic_timeout_minutes_defaults_to_none_when_absent() {
+        let cfg = load_from_str(SAMPLE_MINIMAL, &lookup).unwrap();
+        assert_eq!(cfg.global.restic_timeout_minutes, None);
     }
 }

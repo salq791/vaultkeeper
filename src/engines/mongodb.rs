@@ -46,11 +46,12 @@ impl Engine for MongodbEngine {
         let inv = mongodump_invocation(&ctx.settings, &ctx.secrets, &ctx.staging_dir)?;
         // staging_dir is wiped fresh by the pipeline each run, so create_new cannot collide
         crate::util::write_new_0600(&inv.config_path, inv.config_contents.as_bytes())?;
-        let out = Command::new("mongodump")
-            .args(&inv.argv)
+        let mut cmd = Command::new("mongodump");
+        cmd.args(&inv.argv)
             .env_remove("VAULTKEEPER_MASTER_KEY")
-            .env_remove("RESTIC_PASSWORD")
-            .output();
+            .env_remove("RESTIC_PASSWORD");
+        let out =
+            crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings));
         let _ = std::fs::remove_file(&inv.config_path);
         if inv.config_path.exists() {
             bail!("mongodump config file could not be removed; aborting so credentials are not snapshotted");

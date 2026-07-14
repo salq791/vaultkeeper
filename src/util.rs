@@ -27,7 +27,6 @@ pub fn write_new_0600(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ChildOutput {
     pub status: std::process::ExitStatus,
     pub stdout: Vec<u8>,
@@ -37,7 +36,6 @@ pub struct ChildOutput {
 /// Run a child with piped output and a hard deadline. Reader threads drain
 /// stdout/stderr so a chatty child cannot deadlock on a full pipe; on
 /// timeout the child is killed and an error names the program and deadline.
-#[allow(dead_code)]
 pub fn output_with_timeout(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,

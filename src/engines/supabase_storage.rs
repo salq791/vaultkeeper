@@ -57,13 +57,14 @@ pub fn rclone_invocation(
 impl Engine for SupabaseStorageEngine {
     fn dump(&self, ctx: &DumpCtx) -> Result<PathBuf> {
         let (argv, env) = rclone_invocation(&ctx.settings, &ctx.secrets, &ctx.mirror_root)?;
-        let out = Command::new("rclone")
-            .args(&argv)
+        let mut cmd = Command::new("rclone");
+        cmd.args(&argv)
             .envs(env)
             .env_remove("VAULTKEEPER_MASTER_KEY")
-            .env_remove("RESTIC_PASSWORD")
-            .output()
-            .context("failed to spawn rclone (is it installed?)")?;
+            .env_remove("RESTIC_PASSWORD");
+        let out =
+            crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings))
+                .context("failed to spawn rclone (is it installed?)")?;
         if !out.status.success() {
             bail!(
                 "rclone sync failed: {}",

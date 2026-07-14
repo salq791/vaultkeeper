@@ -181,7 +181,11 @@ fn main() -> Result<()> {
             let st = open_store()?;
             let src = st.get_source(&source)?;
             let engine = engines::engine_for(&src.engine)?;
-            let repo = restic::ResticCli::new(cfg.global.restic_repo, cfg.global.restic_password);
+            let mut repo =
+                restic::ResticCli::new(cfg.global.restic_repo, cfg.global.restic_password);
+            if let Some(mins) = cfg.global.restic_timeout_minutes {
+                repo = repo.with_timeout(std::time::Duration::from_secs(mins * 60));
+            }
             use restic::Repo as _;
             repo.ensure_init()?;
             let out =
@@ -194,7 +198,11 @@ fn main() -> Result<()> {
         }
         Command::Snapshots { source } => {
             let cfg = config::load(&config_path())?;
-            let repo = restic::ResticCli::new(cfg.global.restic_repo, cfg.global.restic_password);
+            let mut repo =
+                restic::ResticCli::new(cfg.global.restic_repo, cfg.global.restic_password);
+            if let Some(mins) = cfg.global.restic_timeout_minutes {
+                repo = repo.with_timeout(std::time::Duration::from_secs(mins * 60));
+            }
             use restic::Repo as _;
             let tag = source.map(|s| format!("source={s}"));
             for snap in repo.snapshots(tag.as_deref())? {

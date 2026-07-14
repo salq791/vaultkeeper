@@ -59,6 +59,7 @@ pub struct ResticCli {
     repo: String,
     password: String,
     bin: String,
+    timeout: std::time::Duration,
 }
 
 impl ResticCli {
@@ -67,16 +68,22 @@ impl ResticCli {
             repo,
             password,
             bin: "restic".into(),
+            timeout: std::time::Duration::from_secs(240 * 60),
         }
     }
 
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     fn run(&self, args: &[String]) -> Result<String> {
-        let out = Command::new(&self.bin)
-            .args(args)
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(args)
             .env("RESTIC_REPOSITORY", &self.repo)
             .env("RESTIC_PASSWORD", &self.password)
-            .env_remove("VAULTKEEPER_MASTER_KEY")
-            .output()
+            .env_remove("VAULTKEEPER_MASTER_KEY");
+        let out = crate::util::output_with_timeout(&mut cmd, self.timeout)
             .with_context(|| format!("failed to spawn {}", self.bin))?;
         if !out.status.success() {
             let truncated =

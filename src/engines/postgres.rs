@@ -50,13 +50,14 @@ impl Engine for PostgresEngine {
     fn dump(&self, ctx: &DumpCtx) -> Result<std::path::PathBuf> {
         let out_file = ctx.staging_dir.join("db.dump");
         let (argv, env) = pg_dump_invocation(&ctx.settings, &ctx.secrets, &out_file)?;
-        let out = Command::new("pg_dump")
-            .args(&argv)
+        let mut cmd = Command::new("pg_dump");
+        cmd.args(&argv)
             .envs(env)
             .env_remove("VAULTKEEPER_MASTER_KEY")
-            .env_remove("RESTIC_PASSWORD")
-            .output()
-            .context("failed to spawn pg_dump (is it installed and on PATH?)")?;
+            .env_remove("RESTIC_PASSWORD");
+        let out =
+            crate::util::output_with_timeout(&mut cmd, super::timeout_from_settings(&ctx.settings))
+                .context("failed to spawn pg_dump (is it installed and on PATH?)")?;
         if !out.status.success() {
             bail!(
                 "pg_dump failed: {}",

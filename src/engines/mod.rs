@@ -32,6 +32,16 @@ pub fn engine_for(kind: &str) -> Result<Box<dyn Engine>> {
     }
 }
 
+/// Per-source child process deadline, read from the source's settings JSON
+/// (key `timeout_minutes`); defaults to 60 minutes when absent.
+pub fn timeout_from_settings(settings: &serde_json::Value) -> std::time::Duration {
+    let mins = settings
+        .get("timeout_minutes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60);
+    std::time::Duration::from_secs(mins * 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +66,21 @@ mod tests {
         ] {
             assert!(engine_for(kind).is_ok(), "{kind} should resolve");
         }
+    }
+
+    #[test]
+    fn timeout_defaults_to_60_minutes() {
+        assert_eq!(
+            timeout_from_settings(&serde_json::json!({})),
+            std::time::Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn timeout_reads_settings_override() {
+        assert_eq!(
+            timeout_from_settings(&serde_json::json!({"timeout_minutes": 5})),
+            std::time::Duration::from_secs(300)
+        );
     }
 }
