@@ -48,11 +48,19 @@ pub fn mongodump_invocation(
 impl Engine for MongodbEngine {
     fn dump(&self, ctx: &DumpCtx) -> Result<PathBuf> {
         let inv = mongodump_invocation(&ctx.settings, &ctx.secrets, &ctx.staging_dir)?;
-        std::fs::write(&inv.config_path, &inv.config_contents)?;
-        #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&inv.config_path, std::fs::Permissions::from_mode(0o600))?;
+            use std::io::Write;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut f = opts
+                .open(&inv.config_path)
+                .context("failed to create mongodump config file")?;
+            f.write_all(inv.config_contents.as_bytes())?;
         }
         let out = Command::new("mongodump")
             .args(&inv.argv)
