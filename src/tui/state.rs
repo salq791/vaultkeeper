@@ -276,15 +276,22 @@ impl App {
     /// Enter on the Snapshots tab loads the currently selected source's
     /// snapshot list (the selection persists across tabs, same as
     /// `run_action`'s use of `selected_source`). Skips reissuing the command
-    /// when `app.snapshots_for` already names this source, so repeatedly
-    /// pressing Enter doesn't respawn the load worker for data already on
-    /// screen.
+    /// when `app.snapshots_for` already names this source (data already on
+    /// screen) or when its `action_label` is still in `busy` (a load is
+    /// already in flight), so repeated Enter never spawns duplicate load
+    /// workers.
     fn enter_action(&self) -> Option<Command> {
         if !matches!(self.tab, Tab::Snapshots) {
             return None;
         }
         let name = self.selected_source()?.name.clone();
         if self.snapshots_for.as_deref() == Some(name.as_str()) {
+            return None;
+        }
+        if self
+            .busy
+            .contains(&crate::tui::data::action_label("snapshots", &name))
+        {
             return None;
         }
         Some(Command::LoadSnapshots(name))
@@ -388,6 +395,19 @@ pub(crate) mod tests {
         app.sources = vec![meta("a-db")];
         app.tab = Tab::Snapshots;
         app.snapshots_for = Some("a-db".to_string());
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Enter)).is_none());
+    }
+
+    #[test]
+    fn double_enter_on_snapshots_tab_is_noop_while_load_in_flight() {
+        let mut app = App::new();
+        app.sources = vec![meta("a-db")];
+        app.tab = Tab::Snapshots;
+        // First Enter dispatched a load: its busy label is still in flight
+        // and no snapshots have arrived yet (snapshots_for is still None),
+        // so a second Enter must not spawn a duplicate load worker.
+        app.busy
+            .push(crate::tui::data::action_label("snapshots", "a-db"));
         assert!(app.handle_key(KeyEvent::from(KeyCode::Enter)).is_none());
     }
 

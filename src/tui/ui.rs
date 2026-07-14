@@ -277,10 +277,10 @@ fn render_snapshots(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Busy labels (in-flight backup/verify/snapshot loads) take priority over
-/// the last status message so an in-progress action stays visible until it
-/// (or an unrelated failure, which clears `busy` too) resolves; falls back
-/// to the keybinding hint when nothing is busy and no status has been set
-/// yet.
+/// the last status message so an in-progress action stays visible until its
+/// own outcome event retains it out of `busy` (each action clears exactly
+/// its own label); falls back to the keybinding hint when nothing is busy
+/// and no status has been set yet.
 fn render_status_line(f: &mut Frame, app: &App, area: Rect) {
     let text = if !app.busy.is_empty() {
         format!("busy: {}", app.busy.join(", "))

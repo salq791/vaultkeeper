@@ -81,13 +81,15 @@ fn apply(app: &mut state::App, ev: data::Event) {
             app.snapshots = snapshots;
             app.snapshots_for = Some(source);
         }
-        data::Event::ActionDone(msg) => {
-            app.busy.retain(|b| *b != msg);
-            app.status_line = format!("done: {msg}");
+        data::Event::ActionDone { label, message } => {
+            app.busy.retain(|b| *b != label);
+            app.status_line = format!("done: {message}");
         }
-        data::Event::ActionFailed(msg) => {
-            app.status_line = format!("FAILED: {msg}");
-            app.busy.clear();
+        data::Event::ActionFailed { label, message } => {
+            // Retain on the label only: a failure must not wipe other
+            // actions' busy entries, which are still genuinely in flight.
+            app.busy.retain(|b| *b != label);
+            app.status_line = format!("FAILED: {message}");
         }
     }
 }
@@ -187,6 +189,38 @@ mod tests {
         dispatch(&mut app, &hub, Command::SetEnabled("a-db".into(), false));
         assert!(app.busy.is_empty());
         assert!(app.status_line.is_empty());
+    }
+
+    #[test]
+    fn apply_action_done_clears_exactly_its_busy_label() {
+        let mut app = App::new();
+        app.busy.push("backup a-db".to_string());
+        app.busy.push("verify other".to_string());
+        apply(
+            &mut app,
+            data::Event::ActionDone {
+                label: "backup a-db".into(),
+                message: "backup a-db: success".into(),
+            },
+        );
+        assert_eq!(app.busy, vec!["verify other".to_string()]);
+        assert_eq!(app.status_line, "done: backup a-db: success");
+    }
+
+    #[test]
+    fn apply_action_failed_clears_only_its_own_label() {
+        let mut app = App::new();
+        app.busy.push("backup a-db".to_string());
+        app.busy.push("verify other".to_string());
+        apply(
+            &mut app,
+            data::Event::ActionFailed {
+                label: "backup a-db".into(),
+                message: "backup a-db: boom".into(),
+            },
+        );
+        assert_eq!(app.busy, vec!["verify other".to_string()]);
+        assert_eq!(app.status_line, "FAILED: backup a-db: boom");
     }
 
     #[test]

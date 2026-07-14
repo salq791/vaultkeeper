@@ -12,8 +12,13 @@ pub enum Event {
         source: String,
         snapshots: Vec<crate::restic::Snapshot>,
     },
-    ActionDone(String),
-    ActionFailed(String),
+    /// `label` is the exact `action_label` string dispatch pushed onto
+    /// `app.busy` (the retain key); `message` is the human-readable outcome
+    /// text, which may append status detail to that label.
+    ActionDone { label: String, message: String },
+    /// Same `label`/`message` split as `ActionDone`, with `message`
+    /// carrying the error text.
+    ActionFailed { label: String, message: String },
 }
 
 /// Owns the config and db path needed to talk to the store, plus the
@@ -69,8 +74,14 @@ impl DataHub {
             let label = action_label("backup", &name);
             let res = crate::exec::execute_source(&cfg, &db, &name);
             let _ = match res {
-                Ok(out) => tx.send(Event::ActionDone(format!("{label}: {}", out.status))),
-                Err(e) => tx.send(Event::ActionFailed(format!("{label}: {e:#}"))),
+                Ok(out) => tx.send(Event::ActionDone {
+                    message: format!("{label}: {}", out.status),
+                    label,
+                }),
+                Err(e) => tx.send(Event::ActionFailed {
+                    message: format!("{label}: {e:#}"),
+                    label,
+                }),
             };
         });
     }
@@ -85,8 +96,14 @@ impl DataHub {
             let label = action_label("verify", &name);
             let res = crate::exec::execute_verify(&cfg, &db, &name);
             let _ = match res {
-                Ok(out) => tx.send(Event::ActionDone(format!("{label}: {}", out.status))),
-                Err(e) => tx.send(Event::ActionFailed(format!("{label}: {e:#}"))),
+                Ok(out) => tx.send(Event::ActionDone {
+                    message: format!("{label}: {}", out.status),
+                    label,
+                }),
+                Err(e) => tx.send(Event::ActionFailed {
+                    message: format!("{label}: {e:#}"),
+                    label,
+                }),
             };
         });
     }
@@ -115,16 +132,22 @@ impl DataHub {
                     });
                 }
                 Err(e) => {
-                    let _ = tx.send(Event::ActionFailed(format!("snapshots {name}: {e:#}")));
+                    let label = action_label("snapshots", &name);
+                    let _ = tx.send(Event::ActionFailed {
+                        message: format!("{label}: {e:#}"),
+                        label,
+                    });
                 }
             }
         });
     }
 }
 
-/// Shared label formatter for busy-list entries and action-outcome
-/// messages, so `mod.rs`'s dispatch (labeling `app.busy`) and these workers
-/// (labeling their `Event`) never drift apart.
+/// The canonical identity of an in-flight action: dispatch pushes this
+/// exact string onto `app.busy`, workers echo it back verbatim in
+/// `ActionDone`/`ActionFailed::label`, and `apply` retains `busy` entries
+/// against it. Outcome `message`s may append status or error detail, but
+/// the label itself is the retain key and must never carry extra text.
 pub fn action_label(kind: &str, name: &str) -> String {
     format!("{kind} {name}")
 }
