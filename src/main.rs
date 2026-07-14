@@ -223,11 +223,7 @@ fn main() -> Result<()> {
         }
         Command::Snapshots { source } => {
             let cfg = config::load(&config_path())?;
-            let mut repo =
-                restic::ResticCli::new(cfg.global.restic_repo, cfg.global.restic_password);
-            if let Some(mins) = cfg.global.restic_timeout_minutes {
-                repo = repo.with_timeout(std::time::Duration::from_secs(mins.saturating_mul(60)));
-            }
+            let repo = exec::build_repo(&cfg);
             use restic::Repo as _;
             let tag = source.map(|s| format!("source={s}"));
             for snap in repo.snapshots(tag.as_deref())? {
@@ -252,6 +248,18 @@ fn main() -> Result<()> {
                         Ok(()) => println!("{}: {label} ok", src.name),
                         Err(e) => {
                             println!("{}: {label} INVALID: {e}", src.name);
+                            problems += 1;
+                        }
+                    }
+                }
+                if let Some(tm) = src.settings.get("timeout_minutes") {
+                    match tm.as_u64() {
+                        Some(v) if v >= 1 => println!("{}: timeout_minutes ok ({v})", src.name),
+                        _ => {
+                            println!(
+                                "{}: timeout_minutes INVALID (must be an integer >= 1)",
+                                src.name
+                            );
                             problems += 1;
                         }
                     }
@@ -319,7 +327,9 @@ fn main() -> Result<()> {
                     );
                     Some(t)
                 }
-                None => std::env::var("VAULTKEEPER_RESTORE_TARGET").ok(),
+                None => std::env::var("VAULTKEEPER_RESTORE_TARGET")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
             };
             exec::execute_restore(
                 &cfg,

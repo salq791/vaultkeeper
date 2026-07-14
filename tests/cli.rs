@@ -372,3 +372,67 @@ restic_password = "testpw"
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("ghost"));
 }
+
+#[test]
+fn check_config_flags_bad_timeout_minutes() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.toml");
+    let db = dir.path().join("vk.db");
+
+    let config_content = r#"
+[global]
+staging_dir = "/staging"
+restic_repo = "local:/tmp/restic"
+restic_password = "testpw"
+"#;
+    std::fs::write(&config_file, config_content).unwrap();
+
+    // Add a source with invalid timeout_minutes (string "soon" instead of integer)
+    let mut child = bin()
+        .env("VAULTKEEPER_CONFIG", &config_file)
+        .env("VAULTKEEPER_MASTER_KEY", K)
+        .env("VAULTKEEPER_DB", &db)
+        .args([
+            "source",
+            "add",
+            "--name",
+            "test-db",
+            "--engine",
+            "postgres",
+            "--schedule",
+            "0 2 * * *",
+            "--settings-json",
+            r#"{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres","timeout_minutes":"soon"}"#,
+            "--secrets-json",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"password":"pw"}"#)
+        .unwrap();
+    let add = child.wait_with_output().unwrap();
+    assert!(add.status.success());
+
+    // Now check-config should report timeout_minutes as INVALID
+    let output = bin()
+        .env("VAULTKEEPER_CONFIG", &config_file)
+        .env("VAULTKEEPER_MASTER_KEY", K)
+        .env("VAULTKEEPER_DB", &db)
+        .args(["check-config"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("timeout_minutes INVALID"),
+        "stdout: {stdout}"
+    );
+    assert!(!output.status.success(), "check-config should fail");
+}

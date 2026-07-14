@@ -360,6 +360,17 @@ impl Store {
         Ok(n as u64)
     }
 
+    /// Counts the number of rows with status = 'running'.
+    #[allow(dead_code)]
+    pub fn count_running(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT count(*) FROM runs WHERE status = 'running'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
     /// Journals a run that was refused by the concurrency guard so scheduled
     /// skips are visible in history instead of only in daemon logs.
     pub fn record_skip(&self, source_id: i64, kind: &str, reason: &str) -> Result<()> {
@@ -643,6 +654,17 @@ mod tests {
             fresh_status, "running",
             "a fresh run (e.g. manual docker-exec) survives daemon boot"
         );
+    }
+
+    #[test]
+    fn count_running_counts_active_runs() {
+        let st = store();
+        let sid = st.add_source(&sample()).unwrap();
+        assert_eq!(st.count_running().unwrap(), 0);
+        let r1 = st.start_run(sid, "backup").unwrap();
+        assert_eq!(st.count_running().unwrap(), 1);
+        st.finish_run(r1, "success", None, None, None).unwrap();
+        assert_eq!(st.count_running().unwrap(), 0);
     }
 
     #[test]

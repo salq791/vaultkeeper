@@ -24,6 +24,13 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
             "cleared {cleared} zombie 'running' row(s) older than 24h from a previous process"
         );
     }
+    let fresh_running = st.count_running()?;
+    if fresh_running > 0 {
+        tracing::info!(
+            "{} run row(s) still marked running (fresh, possibly in flight); they clear via the 24h bound if abandoned",
+            fresh_running
+        );
+    }
     let sources: Vec<(String, String, Option<String>)> = st
         .list_sources()?
         .into_iter()
