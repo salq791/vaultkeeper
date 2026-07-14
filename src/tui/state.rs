@@ -190,11 +190,16 @@ impl SourceForm {
 pub enum Mode {
     Browse,
     SourceForm(Box<SourceForm>),
+    // Both restore modes pin `source` at R time: the event loop's periodic
+    // refresh can replace/reorder app.sources under an open modal, so the
+    // flow must never re-derive the source from the live selection.
     RestoreTarget {
+        source: String,
         snapshot_id: String,
         field: TextField,
     },
     ConfirmRestore {
+        source: String,
         snapshot_id: String,
         target: Option<String>,
         typed: TextField,
@@ -502,9 +507,11 @@ impl App {
     /// currently selected snapshot. Guarded like `enter_action`: only fires
     /// when `snapshots_for` names the same source currently selected (a
     /// stale snapshot list from a previously-viewed source must never
-    /// become a restore target) and a snapshot row actually exists to
-    /// select. The field starts masked since the target may be a
-    /// password-bearing database URL.
+    /// become a restore target), a snapshot row actually exists to select,
+    /// and no restore for this source is already in flight (same busy-label
+    /// dedupe idiom as run_action). The source name is pinned into the mode
+    /// here; the rest of the flow never re-derives it. The field starts
+    /// masked since the target may be a password-bearing database URL.
     fn restore_action(&mut self) -> Option<Command> {
         if !matches!(self.tab, Tab::Snapshots) {
             return None;
@@ -513,8 +520,15 @@ impl App {
         if self.snapshots_for.as_deref() != Some(name.as_str()) {
             return None;
         }
+        if self
+            .busy
+            .contains(&crate::tui::data::action_label("restore", &name))
+        {
+            return None;
+        }
         let snapshot_id = self.snapshots.get(self.sel_snapshot)?.id.clone();
         self.mode = Mode::RestoreTarget {
+            source: name,
             snapshot_id,
             field: TextField::new(true),
         };
@@ -533,11 +547,17 @@ impl App {
             self.mode = Mode::Browse;
             return None;
         }
-        let Mode::RestoreTarget { snapshot_id, field } = &mut self.mode else {
+        let Mode::RestoreTarget {
+            source,
+            snapshot_id,
+            field,
+        } = &mut self.mode
+        else {
             return None;
         };
         match key.code {
             KeyCode::Enter => {
+                let source = source.clone();
                 let snapshot_id = snapshot_id.clone();
                 let value = field.value();
                 let target = if value.trim().is_empty() {
@@ -546,6 +566,7 @@ impl App {
                     Some(value.to_string())
                 };
                 self.mode = Mode::ConfirmRestore {
+                    source,
                     snapshot_id,
                     target,
                     typed: TextField::new(false),
@@ -563,14 +584,18 @@ impl App {
     /// step to `Mode::RestoreTarget` (not all the way to Browse, so a
     /// misfired Esc doesn't discard the target just entered), carrying the
     /// previously entered target back into the field; Enter only produces
-    /// `Command::Restore` when the typed text exactly matches the
-    /// *selected source's* name, returning to `Mode::Browse`; any other
+    /// `Command::Restore` when the typed text exactly matches the *pinned*
+    /// source name (never the live selection, which the periodic refresh
+    /// can shift under the modal) AND no restore for that source is still
+    /// in flight (re-checked here because the open modal can outlive the R
+    /// entry guard), returning to `Mode::Browse` on success; any other
     /// typed text sets the status line instruction and stays put so a typo
     /// can be corrected without restarting the flow; every other key is
     /// forwarded to the typed field.
     fn handle_confirm_restore_key(&mut self, key: KeyEvent) -> Option<Command> {
         if matches!(key.code, KeyCode::Esc) {
             let Mode::ConfirmRestore {
+                source,
                 snapshot_id,
                 target,
                 ..
@@ -583,13 +608,14 @@ impl App {
                 field.set(t);
             }
             self.mode = Mode::RestoreTarget {
+                source: source.clone(),
                 snapshot_id: snapshot_id.clone(),
                 field,
             };
             return None;
         }
-        let source = self.selected_source()?.name.clone();
         let Mode::ConfirmRestore {
+            source,
             snapshot_id,
             target,
             typed,
@@ -599,19 +625,24 @@ impl App {
         };
         match key.code {
             KeyCode::Enter => {
-                if typed.value() == source {
-                    let snapshot = snapshot_id.clone();
-                    let target = target.clone();
-                    self.mode = Mode::Browse;
-                    Some(Command::Restore {
-                        source,
-                        snapshot,
-                        target,
-                    })
-                } else {
+                if typed.value() != source.as_str() {
                     self.status_line = "type the source name exactly to confirm".to_string();
-                    None
+                    return None;
                 }
+                let label = crate::tui::data::action_label("restore", source);
+                if self.busy.contains(&label) {
+                    self.status_line = format!("{label} already running");
+                    return None;
+                }
+                let source = source.clone();
+                let snapshot = snapshot_id.clone();
+                let target = target.clone();
+                self.mode = Mode::Browse;
+                Some(Command::Restore {
+                    source,
+                    snapshot,
+                    target,
+                })
             }
             _ => {
                 typed.handle(key);
@@ -933,5 +964,71 @@ pub(crate) mod tests {
         assert!(matches!(app.mode, Mode::RestoreTarget { .. }));
         app.handle_key(KeyEvent::from(KeyCode::Esc));
         assert!(matches!(app.mode, Mode::Browse));
+    }
+
+    // Review fix (Important): both ends of the restore flow must dedupe
+    // against the "restore <name>" busy label, same idiom as run_action and
+    // enter_action. The R entry guard alone is not enough: the modal flow
+    // can outlive a fast restore's dispatch, so the confirm Enter must
+    // re-check before producing a second Command::Restore.
+    #[test]
+    fn restore_flow_dedupes_against_busy() {
+        // (1) R entry while a restore for this source is in flight: no-op.
+        let mut app = App::new();
+        snapshots_ready(&mut app);
+        app.busy
+            .push(crate::tui::data::action_label("restore", "a-db"));
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Char('R'))).is_none());
+        assert!(matches!(app.mode, Mode::Browse), "R must not open the flow");
+
+        // (2) Separately: flow opened while idle, but the label lands in
+        // busy before the confirm Enter (a restore dispatched behind the
+        // open modal is still in flight).
+        let mut app = App::new();
+        snapshots_ready(&mut app);
+        app.handle_key(KeyEvent::from(KeyCode::Char('R')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        if let Mode::ConfirmRestore { typed, .. } = &mut app.mode {
+            typed.set("a-db");
+        } else {
+            panic!("wrong mode");
+        }
+        app.busy
+            .push(crate::tui::data::action_label("restore", "a-db"));
+        assert!(
+            app.handle_key(KeyEvent::from(KeyCode::Enter)).is_none(),
+            "confirm Enter must re-check busy before producing Restore"
+        );
+    }
+
+    // Review fix (Minor): the flow pins the source name at R time. The
+    // event loop's 2s auto-refresh can replace/reorder app.sources under an
+    // open modal, silently shifting selected_source(); the typed-name
+    // comparison and the produced command must use the pinned name, never a
+    // live re-derivation.
+    #[test]
+    fn restore_flow_pins_source_identity_across_refresh() {
+        let mut app = App::new();
+        snapshots_ready(&mut app);
+        app.handle_key(KeyEvent::from(KeyCode::Char('R')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::ConfirmRestore { .. }));
+        // Simulate the periodic refresh reordering the source list mid-flow:
+        // sel_source (0) now points at a different source, z-db.
+        app.sources = vec![meta("z-db"), meta("a-db")];
+        if let Mode::ConfirmRestore { typed, .. } = &mut app.mode {
+            typed.set("a-db");
+        } else {
+            panic!("wrong mode");
+        }
+        match app.handle_key(KeyEvent::from(KeyCode::Enter)) {
+            Some(Command::Restore {
+                source, snapshot, ..
+            }) => {
+                assert_eq!(source, "a-db", "must restore the pinned source");
+                assert_eq!(snapshot, "deadbeef");
+            }
+            other => panic!("expected Restore for the pinned source, got {other:?}"),
+        }
     }
 }

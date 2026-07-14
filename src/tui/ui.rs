@@ -38,16 +38,20 @@ pub fn render(f: &mut Frame, app: &App) {
     if let Mode::SourceForm(form) = &app.mode {
         render_source_form_overlay(f, form, area);
     }
-    if let Mode::RestoreTarget { snapshot_id, field } = &app.mode {
+    if let Mode::RestoreTarget {
+        snapshot_id, field, ..
+    } = &app.mode
+    {
         render_restore_target_overlay(f, snapshot_id, field, area);
     }
     if let Mode::ConfirmRestore {
+        source,
         snapshot_id,
         target,
         typed,
     } = &app.mode
     {
-        render_confirm_restore_overlay(f, app, snapshot_id, target, typed, area);
+        render_confirm_restore_overlay(f, source, snapshot_id, target, typed, area);
     }
 }
 
@@ -383,29 +387,26 @@ fn render_restore_target_overlay(
 /// Renders the typed-confirmation prompt: snapshot id, whether a target
 /// override was set (`set`) or the environment fallback will apply (`env`),
 /// the instruction to type the source name exactly, and the typed field
-/// itself (unmasked, since a source name is not a secret).
+/// itself (unmasked, since a source name is not a secret). `source` is the
+/// name pinned into the mode at R time, never the live selection: the
+/// instruction must name the source the flow will actually restore, even
+/// if a periodic refresh has shifted app.sources under the modal.
 fn render_confirm_restore_overlay(
     f: &mut Frame,
-    app: &App,
+    source: &str,
     snapshot_id: &str,
     target: &Option<String>,
     typed: &crate::tui::input::TextField,
     area: Rect,
 ) {
     let popup = centered_rect(70, 30, area);
-    let source_name = app
-        .selected_source()
-        .map(|s| s.name.as_str())
-        .unwrap_or("?");
     let lines = vec![
         Line::from(format!("snapshot: {}", short_id(snapshot_id))),
         Line::from(format!(
             "target: {}",
             if target.is_some() { "set" } else { "env" }
         )),
-        Line::from(format!(
-            "type the source name exactly to confirm: {source_name}"
-        )),
+        Line::from(format!("type the source name exactly to confirm: {source}")),
         Line::from(typed.display()),
     ];
     f.render_widget(Clear, popup);
@@ -514,6 +515,7 @@ mod tests {
         let mut field = crate::tui::input::TextField::new(true);
         field.set("supersecretpw");
         app.mode = Mode::RestoreTarget {
+            source: "a-db".to_string(),
             snapshot_id: "deadbeef".to_string(),
             field,
         };
