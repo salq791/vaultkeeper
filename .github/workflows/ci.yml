@@ -28,3 +28,25 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - run: sudo apt-get update && sudo apt-get install -y restic
       - run: cargo test --test e2e_restic -- --ignored
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [test, e2e]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
+          tags: |
+            ghcr.io/salq791/vaultkeeper:latest
+            ghcr.io/salq791/vaultkeeper:sha-${{ github.sha }}
