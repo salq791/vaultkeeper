@@ -49,7 +49,10 @@ pub fn run_backup(
         }
         Err(e) => {
             let detail: String = format!("{e:#}").chars().take(4000).collect();
-            store.finish_run(run_id, "failed", None, None, Some(&detail))?;
+            if let Err(journal_err) = store.finish_run(run_id, "failed", None, None, Some(&detail))
+            {
+                tracing::warn!("failed to journal run {run_id} failure: {journal_err:#}");
+            }
             Err(e)
         }
     }
