@@ -1,0 +1,41 @@
+services:
+  vaultkeeper:
+    build: .
+    image: ghcr.io/salq791/vaultkeeper:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      VAULTKEEPER_CONFIG: /config/config.toml
+      VAULTKEEPER_DB: /data/vaultkeeper.db
+    volumes:
+      - ./config.toml:/config/config.toml:ro
+      - vk-data:/data
+      - vk-staging:/staging
+
+  verify-postgres:
+    image: postgres:18-alpine
+    profiles: ["verify"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: verifier
+      POSTGRES_PASSWORD: ${VERIFY_PG_PASSWORD:?set in .env}
+      POSTGRES_DB: scratch
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U verifier -d scratch"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  verify-mongo:
+    image: mongo:8
+    profiles: ["verify"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping: 1})'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  vk-data:
+  vk-staging:

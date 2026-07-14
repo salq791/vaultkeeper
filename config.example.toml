@@ -1,0 +1,19 @@
+# Copy to config.toml next to docker-compose.yml. Secrets stay in .env.
+[global]
+staging_dir = "/staging"
+restic_repo = "sftp:youraccount@youraccount.repo.borgbase.com:vaultkeeper"
+restic_password = "${RESTIC_PASSWORD}"
+
+[notify]
+healthchecks_base = "https://hc-ping.com"
+# webhook_url = "${SLACK_WEBHOOK}"
+# [notify.ses]
+# region = "us-east-1"
+# from = "backups@example.com"
+# to = ["admin@example.com"]
+
+# Scratch databases for scheduled verify runs. Start them with:
+#   docker compose --profile verify up -d
+[verify]
+postgres_url = "postgres://verifier:${VERIFY_PG_PASSWORD}@verify-postgres:5432/scratch?sslmode=disable"
+mongodb_uri = "mongodb://verify-mongo:27017/scratch"
