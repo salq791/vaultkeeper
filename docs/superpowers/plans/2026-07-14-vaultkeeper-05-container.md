@@ -743,14 +743,18 @@ $VK run --source store-src
 echo "== snapshots =="
 SNAPS=$($VK snapshots)
 echo "$SNAPS"
+printf '%s\n' "$SNAPS" > /tmp/snaps
 for tag in pg-src mongo-src store-src; do
-  echo "$SNAPS" | grep -q "source=$tag" || { echo "missing snapshot for $tag"; exit 1; }
+  grep -q "source=$tag" /tmp/snaps || { echo "missing snapshot for $tag"; exit 1; }
 done
 
 echo "== verifies (scratch password is percent-encoded, sslmode honored) =="
-$VK verify --source pg-src | tee /tmp/v1 | grep -q "tables=1" || { echo "pg verify metrics wrong"; cat /tmp/v1; exit 1; }
-$VK verify --source mongo-src | tee /tmp/v2 | grep -q "docs=2" || { echo "mongo verify metrics wrong"; cat /tmp/v2; exit 1; }
-$VK verify --source store-src | tee /tmp/v3 | grep -q "files=2" || { echo "storage verify metrics wrong"; cat /tmp/v3; exit 1; }
+$VK verify --source pg-src > /tmp/v1 2>&1 || { echo "pg verify failed"; cat /tmp/v1; exit 1; }
+grep -q "tables=1" /tmp/v1 || { echo "pg verify metrics wrong"; cat /tmp/v1; exit 1; }
+$VK verify --source mongo-src > /tmp/v2 2>&1 || { echo "mongo verify failed"; cat /tmp/v2; exit 1; }
+grep -q "docs=2" /tmp/v2 || { echo "mongo verify metrics wrong"; cat /tmp/v2; exit 1; }
+$VK verify --source store-src > /tmp/v3 2>&1 || { echo "storage verify failed"; cat /tmp/v3; exit 1; }
+grep -q "files=2" /tmp/v3 || { echo "storage verify metrics wrong"; cat /tmp/v3; exit 1; }
 
 echo "== restore leg: pg snapshot into a second scratch database =="
 $COMPOSE exec -T scratch-postgres createdb -U verifier restored
