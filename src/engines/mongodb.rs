@@ -141,6 +141,16 @@ impl Engine for MongodbEngine {
             .scratch_mongodb
             .as_deref()
             .context("mongodb verify needs a scratch database: configure [verify] mongodb_uri")?;
+        let source_host = ctx
+            .secrets
+            .get("uri")
+            .and_then(|u| uri_host(u))
+            .unwrap_or_default();
+        if !source_host.is_empty()
+            && uri_host(scratch).is_some_and(|h| h.eq_ignore_ascii_case(&source_host))
+        {
+            bail!("verify scratch host matches the source host; refusing to run verify against the source database");
+        }
         let payload = crate::util::find_named(&ctx.restored_dir, &ctx.source_name)?;
         let config_path = payload.join(".mongorestore-config.yml");
         crate::util::write_new_0600(&config_path, format!("uri: {scratch}\n").as_bytes())?;
@@ -172,6 +182,12 @@ impl Engine for MongodbEngine {
                 crate::util::truncate_marked(&combined, 2000)
             );
         }
+        // Unlike postgres verify, the scratch database here does not need an
+        // explicit reset: --drop above clears collections that this dump
+        // touches, and the doc count below comes from THIS run's
+        // mongorestore output, not a post-hoc database query, so residue
+        // left behind by a prior verify (e.g. extra collections outside this
+        // dump) cannot inflate the count and cause a false pass.
         let docs =
             parse_restored_docs(&combined).context("could not parse restored document count")?;
         anyhow::ensure!(docs > 0, "verify restored zero documents");
@@ -280,6 +296,23 @@ mod tests {
         let out = "2026-07-14T02:00:01.000+0000\t55 document(s) restored successfully. 0 document(s) failed to restore.";
         assert_eq!(parse_restored_docs(out), Some(55));
         assert_eq!(parse_restored_docs("no numbers here"), None);
+    }
+
+    #[test]
+    fn verify_refuses_scratch_on_source_host() {
+        let ctx = super::super::VerifyCtx {
+            restored_dir: std::path::PathBuf::from("/nonexistent"),
+            source_name: "acme-db".into(),
+            scratch_postgres: None,
+            scratch_mongodb: Some("mongodb://u:p@DB.EXAMPLE.COM:27017/scratch".into()),
+            settings: serde_json::json!({}),
+            secrets: HashMap::from([(
+                "uri".to_string(),
+                "mongodb://u:p@db.example.com:27017/app".to_string(),
+            )]),
+        };
+        let err = MongodbEngine.verify(&ctx).unwrap_err();
+        assert!(err.to_string().contains("refusing"));
     }
 
     #[test]

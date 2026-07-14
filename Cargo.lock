@@ -2830,6 +2830,7 @@ dependencies = [
  "croner",
  "hex",
  "hkdf",
+ "percent-encoding",
  "reqwest",
  "rusqlite",
  "serde",

@@ -1,5 +1,6 @@
 use super::{DumpCtx, Engine, RestoreCtx, VerifyCtx};
 use anyhow::{bail, Context, Result};
+use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
@@ -15,35 +16,74 @@ pub fn url_host(url: &str) -> Option<String> {
     url::Url::parse(url).ok()?.host_str().map(|h| h.to_string())
 }
 
-/// Parse `target_url` and build the pg_restore argv + env. The password is
-/// delivered ONLY via the returned PGPASSWORD env pair, never argv.
-pub fn pg_restore_invocation(target_url: &str, dump_file: &Path) -> Result<PgInvocation> {
-    let u = url::Url::parse(target_url).context("invalid target url")?;
+/// Fields extracted from a postgres connection URL, with username, password,
+/// and dbname percent-decoded (url::Url leaves percent-encoding intact on
+/// these components) and an optional sslmode query parameter.
+pub(crate) struct PgParts {
+    pub host: String,
+    pub port: String,
+    pub user: String,
+    pub password: String,
+    pub dbname: String,
+    pub sslmode: Option<String>,
+}
+
+/// Parse a postgres connection URL into its component parts. Username,
+/// password, and the dbname path segment are percent-decoded so that
+/// credentials/db names containing reserved URL characters (e.g. `@`, `/`)
+/// round-trip correctly instead of being passed to pg_restore/psql still
+/// percent-encoded.
+pub(crate) fn parse_pg_url(url: &str) -> Result<PgParts> {
+    let u = url::Url::parse(url).context("invalid target url")?;
     let host = u.host_str().context("target url missing host")?.to_string();
     let port = u.port().unwrap_or(5432).to_string();
     let user = (!u.username().is_empty())
-        .then(|| u.username().to_string())
+        .then(|| u.username())
         .context("target url missing user")?;
-    let password = u
-        .password()
-        .context("target url missing password")?
+    let user = percent_decode_str(user).decode_utf8_lossy().to_string();
+    let password = u.password().context("target url missing password")?;
+    let password = percent_decode_str(password).decode_utf8_lossy().to_string();
+    let dbname_raw = u.path().trim_start_matches('/');
+    let dbname = percent_decode_str(dbname_raw)
+        .decode_utf8_lossy()
         .to_string();
-    let dbname = u.path().trim_start_matches('/').to_string();
     anyhow::ensure!(!dbname.is_empty(), "target url missing database name");
+    let sslmode = u
+        .query_pairs()
+        .find(|(k, _)| k == "sslmode")
+        .map(|(_, v)| v.to_string());
+    Ok(PgParts {
+        host,
+        port,
+        user,
+        password,
+        dbname,
+        sslmode,
+    })
+}
+
+/// Parse `target_url` and build the pg_restore argv + env. The password is
+/// delivered ONLY via the returned PGPASSWORD env pair, never argv.
+pub fn pg_restore_invocation(target_url: &str, dump_file: &Path) -> Result<PgInvocation> {
+    let parts = parse_pg_url(target_url)?;
     let argv = vec![
         "--clean".into(),
         "--if-exists".into(),
         "-h".into(),
-        host,
+        parts.host,
         "-p".into(),
-        port,
+        parts.port,
         "-U".into(),
-        user,
+        parts.user,
         "-d".into(),
-        dbname,
+        parts.dbname,
         dump_file.display().to_string(),
     ];
-    Ok((argv, vec![("PGPASSWORD".to_string(), password)]))
+    let mut env = vec![("PGPASSWORD".to_string(), parts.password)];
+    if let Some(sslmode) = parts.sslmode {
+        env.push(("PGSSLMODE".to_string(), sslmode));
+    }
+    Ok((argv, env))
 }
 
 pub fn pg_dump_invocation(
@@ -115,7 +155,9 @@ impl Engine for PostgresEngine {
             .get("host")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if !ctx.force_same_host && url_host(target).as_deref() == Some(source_host) {
+        if !ctx.force_same_host
+            && url_host(target).is_some_and(|h| h.eq_ignore_ascii_case(source_host))
+        {
             bail!("target host matches the source host; pass --force-same-host to override");
         }
         let payload = crate::util::find_named(&ctx.restored_dir, &ctx.source_name)?;
@@ -143,8 +185,45 @@ impl Engine for PostgresEngine {
             .scratch_postgres
             .as_deref()
             .context("postgres verify needs a scratch database: configure [verify] postgres_url")?;
+        let source_host = ctx
+            .settings
+            .get("host")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if url_host(scratch).is_some_and(|h| h.eq_ignore_ascii_case(source_host)) {
+            bail!("verify scratch host matches the source host; refusing to run verify against the source database");
+        }
         let payload = crate::util::find_named(&ctx.restored_dir, &ctx.source_name)?;
         let (argv, env) = pg_restore_invocation(scratch, &payload.join("db.dump"))?;
+        let psql = |sql: &str| -> Result<String> {
+            let parts = parse_pg_url(scratch)?;
+            let mut cmd = Command::new("psql");
+            cmd.args([
+                "-Atc".to_string(),
+                sql.to_string(),
+                "-h".to_string(),
+                parts.host,
+                "-p".to_string(),
+                parts.port,
+                "-U".to_string(),
+                parts.user,
+                "-d".to_string(),
+                parts.dbname,
+            ])
+            .envs(env.clone())
+            .env_remove("VAULTKEEPER_MASTER_KEY")
+            .env_remove("RESTIC_PASSWORD");
+            let out = crate::util::output_with_timeout(
+                &mut cmd,
+                super::timeout_from_settings(&ctx.settings),
+            )?;
+            anyhow::ensure!(out.status.success(), "psql query failed");
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        // The scratch database is shared and may hold residue from prior
+        // verifies; resetting prevents false passes when a snapshot restores
+        // zero objects.
+        psql("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")?;
         let mut cmd = Command::new("pg_restore");
         cmd.args(&argv)
             .envs(env.clone())
@@ -160,31 +239,6 @@ impl Engine for PostgresEngine {
                 crate::util::truncate_marked(&String::from_utf8_lossy(&out.stderr), 2000)
             );
         }
-        let psql = |sql: &str| -> Result<String> {
-            let u = url::Url::parse(scratch)?;
-            let mut cmd = Command::new("psql");
-            cmd.args([
-                "-Atc".to_string(),
-                sql.to_string(),
-                "-h".to_string(),
-                u.host_str().unwrap_or_default().to_string(),
-                "-p".to_string(),
-                u.port().unwrap_or(5432).to_string(),
-                "-U".to_string(),
-                u.username().to_string(),
-                "-d".to_string(),
-                u.path().trim_start_matches('/').to_string(),
-            ])
-            .envs(env.clone())
-            .env_remove("VAULTKEEPER_MASTER_KEY")
-            .env_remove("RESTIC_PASSWORD");
-            let out = crate::util::output_with_timeout(
-                &mut cmd,
-                super::timeout_from_settings(&ctx.settings),
-            )?;
-            anyhow::ensure!(out.status.success(), "psql query failed");
-            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-        };
         psql("ANALYZE")?;
         let tables: i64 =
             psql("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")?
@@ -286,6 +340,46 @@ mod tests {
         };
         let err = PostgresEngine.restore(&ctx).unwrap_err();
         assert!(err.to_string().contains("force-same-host"));
+    }
+
+    #[test]
+    fn verify_refuses_scratch_on_source_host() {
+        let ctx = super::super::VerifyCtx {
+            restored_dir: std::path::PathBuf::from("/nonexistent"),
+            source_name: "acme-db".into(),
+            scratch_postgres: Some("postgres://u:p@DB.EXAMPLE.COM:5432/scratch".into()),
+            scratch_mongodb: None,
+            settings: serde_json::json!({"host": "db.example.com", "port": 5432, "dbname": "app", "user": "u"}),
+            secrets: HashMap::new(),
+        };
+        let err = PostgresEngine.verify(&ctx).unwrap_err();
+        assert!(err.to_string().contains("refusing"));
+    }
+
+    #[test]
+    fn pg_restore_invocation_decodes_percent_encoded_credentials_and_honors_sslmode() {
+        let (argv, env) = pg_restore_invocation(
+            "postgres://admin:p%40ss%2Fword@restore.example.com:5433/newdb?sslmode=require",
+            Path::new("/r/acme-db/db.dump"),
+        )
+        .unwrap();
+        assert!(env.contains(&("PGPASSWORD".to_string(), "p@ss/word".to_string())));
+        assert!(env.contains(&("PGSSLMODE".to_string(), "require".to_string())));
+        assert!(argv.contains(&"newdb".to_string()));
+        assert!(!argv
+            .iter()
+            .any(|a| a.contains("p%40ss%2Fword") || a.contains("p@ss/word")));
+    }
+
+    #[test]
+    fn pg_restore_invocation_decodes_percent_encoded_dbname() {
+        let (argv, _env) = pg_restore_invocation(
+            "postgres://admin:pw@restore.example.com:5433/my%2Ddb",
+            Path::new("/r/acme-db/db.dump"),
+        )
+        .unwrap();
+        assert!(argv.contains(&"my-db".to_string()));
+        assert!(!argv.iter().any(|a| a.contains("%2D") || a.contains("%2d")));
     }
 
     #[test]
