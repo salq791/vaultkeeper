@@ -15,7 +15,7 @@ pub fn execute_source(
         cfg.global.restic_password.clone(),
     );
     if let Some(mins) = cfg.global.restic_timeout_minutes {
-        repo = repo.with_timeout(std::time::Duration::from_secs(mins * 60));
+        repo = repo.with_timeout(std::time::Duration::from_secs(mins.saturating_mul(60)));
     }
     let notifier = Notifier::from_notify(&cfg.notify)?;
     notifier.notify(

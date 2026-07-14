@@ -26,7 +26,7 @@ retention pruning, append-only capability.
 - [x] Design spec
 - [x] Core backup path (Postgres -> restic)
 - [x] MongoDB, Supabase Storage, Supabase Edge Functions engines
-- [ ] Built-in scheduler, healthchecks.io / webhook / SES alerting
+- [x] Built-in scheduler, healthchecks.io / webhook / SES alerting
 - [ ] Restore command + scheduled restore verification
 - [ ] Terminal UI (ratatui) with encrypted credential management
 

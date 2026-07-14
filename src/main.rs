@@ -254,6 +254,21 @@ fn main() -> Result<()> {
                     }
                 );
             }
+            let mut channels = Vec::new();
+            if cfg.notify.healthchecks_base.is_some() {
+                channels.push("healthchecks configured");
+            }
+            if cfg.notify.webhook_url.is_some() {
+                channels.push("webhook configured");
+            }
+            if cfg.notify.ses.is_some() {
+                channels.push("ses configured");
+            }
+            if channels.is_empty() {
+                println!("notify: none configured");
+            } else {
+                println!("notify: {}", channels.join(", "));
+            }
             Ok(())
         }
         Command::Daemon => {

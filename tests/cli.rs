@@ -183,3 +183,38 @@ fn source_disable_then_list_shows_disabled() {
     assert!(!bad_schedule.status.success());
     assert!(String::from_utf8_lossy(&bad_schedule.stderr).contains("banana"));
 }
+
+#[test]
+fn check_config_reports_notify_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.toml");
+    let db = dir.path().join("vk.db");
+
+    let config_content = r#"
+[global]
+staging_dir = "/staging"
+restic_repo = "local:/tmp/restic"
+restic_password = "testpw"
+
+[notify]
+healthchecks_base = "https://hc-ping.com"
+"#;
+
+    std::fs::write(&config_file, config_content).unwrap();
+
+    let output = bin()
+        .env("VAULTKEEPER_CONFIG", &config_file)
+        .env("VAULTKEEPER_MASTER_KEY", K)
+        .env("VAULTKEEPER_DB", &db)
+        .args(["check-config"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("healthchecks configured"));
+}
