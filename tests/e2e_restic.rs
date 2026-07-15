@@ -15,9 +15,10 @@ fn full_backup_into_local_restic_repo() {
     std::fs::write(
         &cfg_path,
         format!(
-            "[global]\nstaging_dir = \"{}\"\nrestic_repo = \"{}\"\nrestic_password = \"testpw\"\n",
+            "[global]\nstaging_dir = \"{}\"\nrestic_repo = \"{}\"\nrestic_password = \"testpw\"\nsecret_temp_dir = \"{}\"\n",
             staging.display().to_string().replace('\\', "/"),
             repo.display().to_string().replace('\\', "/"),
+            dir.path().join("secrets").display().to_string().replace('\\', "/"),
         ),
     )
     .unwrap();
