@@ -1,5 +1,5 @@
 use crate::tui::state::{status_color, App, Mode, Tab};
-use chrono::Local;
+use chrono::Utc;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -107,7 +107,10 @@ fn render_dashboard(f: &mut Frame, app: &App, area: Rect) {
             let last_status = last.map(|r| r.status.as_str()).unwrap_or("-");
             let last_run = last.map(|r| r.started_at.as_str()).unwrap_or("-");
             let next_run = if s.enabled {
-                match crate::schedule::next_occurrence(&s.schedule, Local::now()) {
+                match crate::schedule::next_occurrence(
+                    &s.schedule,
+                    Utc::now().with_timezone(&app.timezone),
+                ) {
                     Ok(t) => t.format("%Y-%m-%d %H:%M").to_string(),
                     Err(_) => "?".to_string(),
                 }

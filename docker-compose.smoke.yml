@@ -14,6 +14,7 @@ services:
 
   source-mongo:
     image: mongo:8
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     healthcheck:
       test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping: 1})'"]
       interval: 2s
@@ -30,6 +31,16 @@ services:
       test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
       interval: 2s
       timeout: 3s
+      retries: 30
+
+  mock-supabase-api:
+    image: nginx:1.29-alpine
+    volumes:
+      - ./scripts/smoke-api:/usr/share/nginx/html:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/v1/projects/smoke-project/config/auth >/dev/null"]
+      interval: 2s
+      timeout: 2s
       retries: 30
 
   scratch-postgres:
@@ -59,6 +70,9 @@ services:
     # image's non-root user.
     user: "0"
     entrypoint: ["sleep", "infinity"]
+    # The smoke replaces PID 1 with `sleep infinity`, which intentionally has
+    # none of the daemon's SIGTERM handling. Keep disposable teardown fast.
+    stop_grace_period: 1s
     environment:
       VAULTKEEPER_CONFIG: /config/config.toml
       VAULTKEEPER_DB: /data/vaultkeeper.db
@@ -66,9 +80,13 @@ services:
       RESTIC_PASSWORD: smokerepopw
     volumes:
       - ./scripts/smoke-config.toml:/config/config.toml:ro
+      - ./scripts/smoke-functions:/project/functions:ro
+      - ./scripts/smoke-supabase.sh:/smoke/supabase-shim:ro
       - smoke-repo:/repo
       - smoke-staging:/staging
       - smoke-data:/data
+    tmpfs:
+      - /run/vaultkeeper:mode=0700
 
 volumes:
   smoke-repo:

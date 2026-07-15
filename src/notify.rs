@@ -14,7 +14,10 @@ pub enum RunEvent<'a> {
 /// Everything else, including statuses this version does not know,
 /// pings /fail: fail closed.
 pub fn is_success_ping(status: &str) -> bool {
-    matches!(status, "success" | "success_prune_failed" | "verify_passed")
+    matches!(
+        status,
+        "success" | "success_retention_failed" | "success_prune_failed" | "verify_passed"
+    )
 }
 
 /// Statuses that reach humans via webhook and email. verify_passed is
@@ -22,13 +25,18 @@ pub fn is_success_ping(status: &str) -> bool {
 pub fn alerts_humans(status: &str) -> bool {
     matches!(
         status,
-        "failed" | "success_prune_failed" | "verify_failed" | "verify_passed"
+        "failed"
+            | "success_retention_failed"
+            | "success_prune_failed"
+            | "verify_failed"
+            | "verify_passed"
     )
 }
 
-/// success_prune_failed still pings healthchecks success: the dead-man switch
-/// measures backup freshness and a snapshot exists. The prune problem reaches
-/// the human via webhook/email, which DO fire for success_prune_failed.
+/// A successful backup with failed retention still pings healthchecks
+/// success: the dead-man switch measures backup freshness and a snapshot
+/// exists. The retention problem reaches the human via webhook/email, which
+/// DO fire for this partial-success state.
 /// Unknown statuses ping /fail: fail closed.
 pub fn hc_url(base: &str, uuid: &str, event: &RunEvent) -> String {
     let base = base.trim_end_matches('/');
@@ -187,7 +195,7 @@ mod tests {
         };
         assert_eq!(hc_url(B, "u1", &ok), "https://hc-ping.com/u1");
         let warn = RunEvent::Finished {
-            status: "success_prune_failed",
+            status: "success_retention_failed",
             snapshot_id: Some("s"),
             detail: Some("d"),
         };
@@ -256,6 +264,8 @@ mod tests {
     #[test]
     fn alert_gating_per_status() {
         assert!(alerts_humans("failed"));
+        assert!(alerts_humans("success_retention_failed"));
+        // Rows written by v0.1.0 retain their original status semantics.
         assert!(alerts_humans("success_prune_failed"));
         assert!(alerts_humans("verify_failed"));
         assert!(alerts_humans("verify_passed"));

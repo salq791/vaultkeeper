@@ -272,6 +272,7 @@ impl std::fmt::Debug for Command {
 }
 
 pub struct App {
+    pub timezone: chrono_tz::Tz,
     pub tab: Tab,
     pub mode: Mode,
     pub sources: Vec<crate::store::SourceMeta>,
@@ -294,6 +295,7 @@ impl Default for App {
 impl App {
     pub fn new() -> App {
         App {
+            timezone: chrono_tz::UTC,
             tab: Tab::Dashboard,
             mode: Mode::Browse,
             sources: Vec::new(),
@@ -329,7 +331,17 @@ impl App {
 
     fn handle_browse_key(&mut self, key: KeyEvent) -> Option<Command> {
         match key.code {
-            KeyCode::Char('q') => Some(Command::Quit),
+            KeyCode::Char('q') => {
+                if self.busy.is_empty() {
+                    Some(Command::Quit)
+                } else {
+                    self.status_line = format!(
+                        "waiting for {} in-flight action(s) before exit",
+                        self.busy.len()
+                    );
+                    None
+                }
+            }
             KeyCode::Char('?') => {
                 self.mode = Mode::Help;
                 None
@@ -658,7 +670,7 @@ pub fn status_color(status: &str) -> Color {
     match status {
         "success" => Color::Green,
         "verify_passed" => Color::Cyan,
-        "success_prune_failed" => Color::Yellow,
+        "success_retention_failed" | "success_prune_failed" => Color::Yellow,
         "failed" | "verify_failed" => Color::Red,
         _ => Color::Gray,
     }
@@ -727,6 +739,7 @@ pub(crate) mod tests {
         assert_eq!(status_color("success"), Color::Green);
         assert_eq!(status_color("failed"), Color::Red);
         assert_eq!(status_color("verify_failed"), Color::Red);
+        assert_eq!(status_color("success_retention_failed"), Color::Yellow);
         assert_eq!(status_color("success_prune_failed"), Color::Yellow);
         assert_eq!(status_color("verify_passed"), Color::Cyan);
         assert_eq!(status_color("some_future_status"), Color::Gray);
@@ -892,6 +905,19 @@ pub(crate) mod tests {
         app.busy
             .push(crate::tui::data::action_label("verify", "a-db"));
         assert!(app.handle_key(KeyEvent::from(KeyCode::Char('v'))).is_none());
+    }
+
+    #[test]
+    fn quit_waits_for_in_flight_workers() {
+        let mut app = App::new();
+        app.busy.push("backup a-db".into());
+        assert!(app.handle_key(KeyEvent::from(KeyCode::Char('q'))).is_none());
+        assert!(app.status_line.contains("waiting for 1"));
+        app.busy.clear();
+        assert!(matches!(
+            app.handle_key(KeyEvent::from(KeyCode::Char('q'))),
+            Some(Command::Quit)
+        ));
     }
 
     // --- Plan 6 Task 6: restore flow ---

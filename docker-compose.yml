@@ -3,6 +3,14 @@ services:
     build: .
     image: ghcr.io/salq791/vaultkeeper:latest
     restart: unless-stopped
+    # Covers the longest sequence of default engine/restic deadlines. If you
+    # raise timeout_minutes or restic_timeout_minutes, raise this too.
+    stop_grace_period: ${VAULTKEEPER_STOP_GRACE_PERIOD:-14h10m}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
     env_file: .env
     environment:
       VAULTKEEPER_CONFIG: /config/config.toml
@@ -11,6 +19,11 @@ services:
       - ./config.toml:/config/config.toml:ro
       - vk-data:/data
       - vk-staging:/staging
+      # Mount your local Supabase functions directory read-only when using
+      # the supabase_functions engine, then set local_functions_dir to this path.
+      # - ./supabase/functions:/project/supabase/functions:ro
+    tmpfs:
+      - /run/vaultkeeper:mode=0700,uid=1000,gid=1000
 
   verify-postgres:
     image: postgres:18-alpine

@@ -1,8 +1,16 @@
 # Copy to config.toml next to docker-compose.yml. Secrets stay in .env.
 [global]
+# Payloads here are plaintext before restic encrypts them. Use encrypted host
+# storage if local-at-rest confidentiality is required; see SECURITY.md.
 staging_dir = "/staging"
+secret_temp_dir = "/run/vaultkeeper"
+restore_output_dir = "/data/restores"
 restic_repo = "sftp:youraccount@youraccount.repo.borgbase.com:vaultkeeper"
 restic_password = "${RESTIC_PASSWORD}"
+restic_host = "vaultkeeper"
+# Weekly prune followed by a full restic check, evaluated in this IANA zone.
+maintenance_schedule = "0 3 * * 0"
+timezone = "UTC"
 
 [notify]
 healthchecks_base = "https://hc-ping.com"

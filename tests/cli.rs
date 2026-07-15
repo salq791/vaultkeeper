@@ -11,7 +11,7 @@ const K: &str = "111111111111111111111111111111111111111111111111111111111111111
 fn source_add_then_list_shows_source_without_secrets() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("vk.db");
-    let add = bin()
+    let mut child = bin()
         .env("VAULTKEEPER_MASTER_KEY", K)
         .env("VAULTKEEPER_DB", &db)
         .args([
@@ -26,17 +26,25 @@ fn source_add_then_list_shows_source_without_secrets() {
             "--settings-json",
             r#"{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}"#,
             "--secrets-json",
-            r#"{"password":"pw"}"#,
+            "-",
         ])
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(br#"{"password":"pw"}"#)
+        .unwrap();
+    let add = child.wait_with_output().unwrap();
     assert!(
         add.status.success(),
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
-    let add_stderr = String::from_utf8_lossy(&add.stderr);
-    assert!(add_stderr.contains("warning: inline --secrets-json"));
 
     let list = bin()
         .env("VAULTKEEPER_MASTER_KEY", K)
@@ -48,6 +56,35 @@ fn source_add_then_list_shows_source_without_secrets() {
     assert!(stdout.contains("acme-db"));
     assert!(stdout.contains("postgres"));
     assert!(!stdout.contains("pw"), "secrets must never be printed");
+}
+
+#[test]
+fn source_add_refuses_inline_secrets_without_echoing_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("vk.db");
+    let output = bin()
+        .env("VAULTKEEPER_MASTER_KEY", K)
+        .env("VAULTKEEPER_DB", &db)
+        .args([
+            "source",
+            "add",
+            "--name",
+            "acme-db",
+            "--engine",
+            "postgres",
+            "--schedule",
+            "0 2 * * *",
+            "--settings-json",
+            r#"{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}"#,
+            "--secrets-json",
+            r#"{"password":"do-not-echo"}"#,
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("process arguments"));
+    assert!(!stderr.contains("do-not-echo"));
 }
 
 #[test]
@@ -189,7 +226,7 @@ fn source_add_accepts_verify_schedule_and_verify_hc_uuid_and_validates_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("vk.db");
 
-    let add = bin()
+    let mut child = bin()
         .env("VAULTKEEPER_MASTER_KEY", K)
         .env("VAULTKEEPER_DB", &db)
         .args([
@@ -208,10 +245,20 @@ fn source_add_accepts_verify_schedule_and_verify_hc_uuid_and_validates_it() {
             "--settings-json",
             r#"{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}"#,
             "--secrets-json",
-            r#"{"password":"pw"}"#,
+            "-",
         ])
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(br#"{"password":"pw"}"#)
+        .unwrap();
+    let add = child.wait_with_output().unwrap();
     assert!(
         add.status.success(),
         "{}",
@@ -327,13 +374,11 @@ restic_password = "testpw"
         .env("VAULTKEEPER_CONFIG", &config_file)
         .env("VAULTKEEPER_MASTER_KEY", K)
         .env("VAULTKEEPER_DB", &db)
-        .args([
-            "restore",
-            "--source",
-            "ghost",
-            "--target",
+        .env(
+            "VAULTKEEPER_RESTORE_TARGET",
             "postgres://u:p@x.example.com/db",
-        ])
+        )
+        .args(["restore", "--source", "ghost"])
         .output()
         .unwrap();
 
@@ -342,7 +387,7 @@ restic_password = "testpw"
 }
 
 #[test]
-fn restore_falls_back_to_env_target_when_flag_omitted() {
+fn restore_reads_target_from_environment() {
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.toml");
     let db = dir.path().join("vk.db");
@@ -367,8 +412,8 @@ restic_password = "testpw"
         .output()
         .unwrap();
 
-    // No --target passed inline; the env fallback should wire the target
-    // through without erroring before the (expected) unknown-source failure.
+    // The environment-only target is wired through without erroring before
+    // the expected unknown-source failure.
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("ghost"));
 }
@@ -387,7 +432,7 @@ restic_password = "testpw"
 "#;
     std::fs::write(&config_file, config_content).unwrap();
 
-    // Add a source with invalid timeout_minutes (string "soon" instead of integer)
+    // New writes reject an invalid timeout immediately.
     let mut child = bin()
         .env("VAULTKEEPER_CONFIG", &config_file)
         .env("VAULTKEEPER_MASTER_KEY", K)
@@ -418,9 +463,51 @@ restic_password = "testpw"
         .write_all(br#"{"password":"pw"}"#)
         .unwrap();
     let add = child.wait_with_output().unwrap();
-    assert!(add.status.success());
+    assert!(!add.status.success());
+    assert!(String::from_utf8_lossy(&add.stderr).contains("timeout_minutes"));
 
-    // Now check-config should report timeout_minutes as INVALID
+    // Add a valid row, then emulate a malformed row written by an older
+    // release so check-config's compatibility audit remains covered.
+    let mut child = bin()
+        .env("VAULTKEEPER_CONFIG", &config_file)
+        .env("VAULTKEEPER_MASTER_KEY", K)
+        .env("VAULTKEEPER_DB", &db)
+        .args([
+            "source",
+            "add",
+            "--name",
+            "test-db",
+            "--engine",
+            "postgres",
+            "--schedule",
+            "0 2 * * *",
+            "--settings-json",
+            r#"{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}"#,
+            "--secrets-json",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"password":"pw"}"#)
+        .unwrap();
+    let valid_add = child.wait_with_output().unwrap();
+    assert!(valid_add.status.success());
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE sources SET settings_json = ?1 WHERE name = 'test-db'",
+            [r#"{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres","timeout_minutes":"soon"}"#],
+        )
+        .unwrap();
+
+    // check-config still detects malformed legacy/database-edited rows.
     let output = bin()
         .env("VAULTKEEPER_CONFIG", &config_file)
         .env("VAULTKEEPER_MASTER_KEY", K)

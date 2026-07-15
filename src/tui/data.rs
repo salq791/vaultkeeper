@@ -122,6 +122,15 @@ impl DataHub {
     ) -> anyhow::Result<String> {
         let store =
             crate::store::Store::open(&self.db_path, crate::crypto::MasterKey::from_env()?)?;
+        let effective_secrets = if keep_secrets {
+            let original = editing
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("cannot keep secrets for a new source"))?;
+            store.get_source(original)?.secrets
+        } else {
+            draft.secrets.clone()
+        };
+        crate::engines::validate_config(&draft.engine, &draft.settings, &effective_secrets)?;
         match editing {
             Some(original) => store.update_source(original, draft, keep_secrets)?,
             None => {
@@ -211,6 +220,7 @@ impl DataHub {
                 target.as_deref(),
                 false,
                 false,
+                Some(source.as_str()),
             );
             let _ = match res {
                 Ok(()) => tx.send(Event::ActionDone {

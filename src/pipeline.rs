@@ -16,13 +16,23 @@ pub fn run_backup(
     repo: &dyn Repo,
     source: &SourceRow,
     staging_root: &Path,
+    secret_temp_dir: &Path,
     engine: &dyn Engine,
 ) -> Result<RunOutcome> {
     crate::store::validate_name(&source.name)?;
     let run_id = store.start_run(source.id, "backup")?;
+    let heartbeat = match store.start_heartbeat(run_id) {
+        Ok(heartbeat) => heartbeat,
+        Err(error) => {
+            let detail = crate::util::truncate_marked(&format!("{error:#}"), 4000);
+            let _ = store.finish_run(run_id, "failed", None, None, Some(&detail));
+            return Err(error);
+        }
+    };
     let staging_dir = staging_root.join(&source.name);
     let result = (|| -> Result<(String, i64, Option<String>)> {
         repo.ensure_init()?;
+        crate::util::ensure_private_dir(secret_temp_dir)?;
         if staging_dir.exists() {
             std::fs::remove_dir_all(&staging_dir)?;
         }
@@ -40,7 +50,9 @@ pub fn run_backup(
             std::fs::set_permissions(&mirror_root, std::fs::Permissions::from_mode(0o700))?;
         }
         let ctx = DumpCtx {
+            source_name: source.name.clone(),
             staging_dir: staging_dir.clone(),
+            secret_temp_dir: secret_temp_dir.to_path_buf(),
             mirror_root,
             settings: source.settings.clone(),
             secrets: source.secrets.clone(),
@@ -48,16 +60,17 @@ pub fn run_backup(
         let backup_path = engine.dump(&ctx)?;
         let tag = format!("source={}", source.name);
         let summary = repo.backup(&backup_path, &tag)?;
-        let prune_err = repo
+        let retention_err = repo
             .forget(&tag, &source.retention)
             .err()
             .map(|e| crate::util::truncate_marked(&format!("{e:#}"), 4000));
         Ok((
             summary.snapshot_id,
             summary.total_bytes_processed,
-            prune_err,
+            retention_err,
         ))
     })();
+    drop(heartbeat);
     let _ = std::fs::remove_dir_all(&staging_dir);
 
     match result {
@@ -73,22 +86,22 @@ pub fn run_backup(
                 status: "success".into(),
             })
         }
-        Ok((snapshot_id, bytes, Some(prune_err))) => {
+        Ok((snapshot_id, bytes, Some(retention_err))) => {
             if let Err(journal_err) = store.finish_run(
                 run_id,
-                "success_prune_failed",
+                "success_retention_failed",
                 Some(bytes),
                 Some(&snapshot_id),
-                Some(&prune_err),
+                Some(&retention_err),
             ) {
                 tracing::warn!(
-                    "failed to journal run {run_id} success_prune_failed: {journal_err:#}"
+                    "failed to journal run {run_id} success_retention_failed: {journal_err:#}"
                 );
             }
             Ok(RunOutcome {
                 run_id,
                 snapshot_id: Some(snapshot_id),
-                status: "success_prune_failed".into(),
+                status: "success_retention_failed".into(),
             })
         }
         Err(e) => {
@@ -183,6 +196,14 @@ mod tests {
             self.calls.borrow_mut().push(format!("forget:{tag}"));
             Ok(())
         }
+        fn prune(&self) -> Result<()> {
+            self.calls.borrow_mut().push("prune".into());
+            Ok(())
+        }
+        fn check(&self) -> Result<()> {
+            self.calls.borrow_mut().push("check".into());
+            Ok(())
+        }
         fn snapshots(&self, _tag: Option<&str>) -> Result<Vec<Snapshot>> {
             Ok(vec![])
         }
@@ -205,6 +226,12 @@ mod tests {
         fn forget(&self, _tag: &str, _r: &Retention) -> Result<()> {
             anyhow::bail!("repository is locked by another process")
         }
+        fn prune(&self) -> Result<()> {
+            Ok(())
+        }
+        fn check(&self) -> Result<()> {
+            Ok(())
+        }
         fn snapshots(&self, _tag: Option<&str>) -> Result<Vec<Snapshot>> {
             Ok(vec![])
         }
@@ -222,6 +249,12 @@ mod tests {
             unreachable!()
         }
         fn forget(&self, _t: &str, _r: &Retention) -> Result<()> {
+            unreachable!()
+        }
+        fn prune(&self) -> Result<()> {
+            unreachable!()
+        }
+        fn check(&self) -> Result<()> {
             unreachable!()
         }
         fn snapshots(&self, _t: Option<&str>) -> Result<Vec<Snapshot>> {
@@ -276,7 +309,15 @@ mod tests {
     fn success_path_backs_up_forgets_and_journals() {
         let (st, src, staging) = setup();
         let repo = MockRepo::default();
-        let out = run_backup(&st, &repo, &src, staging.path(), &OkEngine).unwrap();
+        let out = run_backup(
+            &st,
+            &repo,
+            &src,
+            staging.path(),
+            &staging.path().join(".secrets"),
+            &OkEngine,
+        )
+        .unwrap();
         assert_eq!(out.status, "success");
         assert_eq!(out.snapshot_id.as_deref(), Some("snap1"));
         assert_eq!(
@@ -293,7 +334,15 @@ mod tests {
     fn mirror_engine_backs_up_mirror_and_it_survives() {
         let (st, src, staging) = setup();
         let repo = MockRepo::default();
-        let out = run_backup(&st, &repo, &src, staging.path(), &MirrorEngine).unwrap();
+        let out = run_backup(
+            &st,
+            &repo,
+            &src,
+            staging.path(),
+            &staging.path().join(".secrets"),
+            &MirrorEngine,
+        )
+        .unwrap();
         assert_eq!(out.status, "success");
         let mirror = staging.path().join(".mirrors").join("acme-db");
         assert!(
@@ -310,7 +359,15 @@ mod tests {
     fn failure_path_journals_detail_and_cleans_staging() {
         let (st, src, staging) = setup();
         let repo = MockRepo::default();
-        let err = run_backup(&st, &repo, &src, staging.path(), &FailEngine).unwrap_err();
+        let err = run_backup(
+            &st,
+            &repo,
+            &src,
+            staging.path(),
+            &staging.path().join(".secrets"),
+            &FailEngine,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("connection refused"));
         assert!(
             repo.calls.borrow().is_empty(),
@@ -327,13 +384,21 @@ mod tests {
     }
 
     #[test]
-    fn prune_failure_after_successful_backup_is_partial_success() {
+    fn retention_failure_after_successful_backup_is_partial_success() {
         let (st, src, staging) = setup();
-        let out = run_backup(&st, &PruneFailRepo, &src, staging.path(), &OkEngine).unwrap();
-        assert_eq!(out.status, "success_prune_failed");
+        let out = run_backup(
+            &st,
+            &PruneFailRepo,
+            &src,
+            staging.path(),
+            &staging.path().join(".secrets"),
+            &OkEngine,
+        )
+        .unwrap();
+        assert_eq!(out.status, "success_retention_failed");
         assert_eq!(out.snapshot_id.as_deref(), Some("snap9"));
         let runs = st.recent_runs(1).unwrap();
-        assert_eq!(runs[0].status, "success_prune_failed");
+        assert_eq!(runs[0].status, "success_retention_failed");
         assert_eq!(runs[0].snapshot_id.as_deref(), Some("snap9"));
         assert!(runs[0].detail.as_deref().unwrap().contains("locked"));
         assert_eq!(runs[0].bytes, Some(7));
@@ -342,7 +407,15 @@ mod tests {
     #[test]
     fn repo_init_failure_is_journaled() {
         let (st, src, staging) = setup();
-        let err = run_backup(&st, &InitFailRepo, &src, staging.path(), &OkEngine).unwrap_err();
+        let err = run_backup(
+            &st,
+            &InitFailRepo,
+            &src,
+            staging.path(),
+            &staging.path().join(".secrets"),
+            &OkEngine,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("unreachable"));
         let runs = st.recent_runs(1).unwrap();
         assert_eq!(runs[0].status, "failed");
@@ -377,6 +450,7 @@ mod tests {
             &MockRepo::default(),
             &src,
             staging.path(),
+            &staging.path().join(".secrets"),
             &SabotageEngine { db_path },
         )
         .unwrap_err();

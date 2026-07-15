@@ -12,8 +12,14 @@ pub fn run(cfg: crate::config::Config, db_path: String) -> Result<()> {
         std::io::stdout().is_terminal(),
         "the tui needs an interactive terminal: run it via 'docker compose exec -it vaultkeeper vaultkeeper tui'"
     );
+    let timezone = cfg
+        .global
+        .timezone
+        .parse::<chrono_tz::Tz>()
+        .with_context(|| format!("invalid IANA timezone '{}'", cfg.global.timezone))?;
     let hub = data::DataHub::new(cfg, db_path)?;
     let mut app = state::App::new();
+    app.timezone = timezone;
     if let Ok(ev) = hub.refresh() {
         apply(&mut app, ev);
     }
@@ -175,9 +181,14 @@ mod tests {
         crate::config::Config {
             global: crate::config::Global {
                 staging_dir: std::path::PathBuf::from("does-not-exist-staging"),
+                secret_temp_dir: std::path::PathBuf::from("does-not-exist-secrets"),
+                restore_output_dir: std::path::PathBuf::from("does-not-exist-restores"),
                 restic_repo: "local:does-not-exist-repo".into(),
                 restic_password: "test".into(),
+                restic_host: "vaultkeeper-test".into(),
                 restic_timeout_minutes: None,
+                maintenance_schedule: "0 3 * * 0".into(),
+                timezone: "UTC".into(),
             },
             notify: Default::default(),
             verify: Default::default(),

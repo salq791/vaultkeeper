@@ -17,12 +17,20 @@ pub fn rclone_invocation(
         .get("endpoint")
         .and_then(|v| v.as_str())
         .context("supabase_storage settings missing 'endpoint'")?;
+    let parsed_endpoint = url::Url::parse(endpoint).context("invalid storage endpoint URL")?;
+    anyhow::ensure!(
+        matches!(parsed_endpoint.scheme(), "http" | "https")
+            && parsed_endpoint.host_str().is_some(),
+        "storage endpoint must be an http(s) URL with a host"
+    );
     let access_key = secrets
         .get("access_key")
         .context("supabase_storage secrets missing 'access_key'")?;
     let secret_key = secrets
         .get("secret_key")
         .context("supabase_storage secrets missing 'secret_key'")?;
+    anyhow::ensure!(!access_key.is_empty(), "storage access_key cannot be empty");
+    anyhow::ensure!(!secret_key.is_empty(), "storage secret_key cannot be empty");
 
     let argv = vec![
         "sync".to_string(),
@@ -48,7 +56,14 @@ pub fn rclone_invocation(
             endpoint.to_string(),
         ),
     ];
-    if let Some(region) = settings.get("region").and_then(|v| v.as_str()) {
+    if let Some(region) = settings.get("region") {
+        let region = region
+            .as_str()
+            .context("supabase_storage region must be a string")?;
+        anyhow::ensure!(
+            !region.is_empty(),
+            "supabase_storage region cannot be empty"
+        );
         env.push(("RCLONE_CONFIG_SUPA_REGION".to_string(), region.to_string()));
     }
     Ok((argv, env))
@@ -163,10 +178,13 @@ mod tests {
     fn storage_restore_requires_confirmation() {
         let ctx = super::super::RestoreCtx {
             restored_dir: std::path::PathBuf::from("/nonexistent"),
+            durable_output_dir: std::path::PathBuf::from("/nonexistent-output"),
+            secret_temp_dir: std::path::PathBuf::from("/run/vaultkeeper"),
             source_name: "acme-storage".into(),
             target: None,
             force_same_host: false,
             confirm_remote_overwrite: false,
+            confirmed_source: None,
             settings: serde_json::json!({"endpoint": "https://proj.storage.example.com/storage/v1/s3"}),
             secrets: std::collections::HashMap::from([
                 ("access_key".to_string(), "AK".to_string()),
@@ -185,6 +203,7 @@ mod tests {
         std::fs::write(mirror.join("obj1"), b"abcd").unwrap();
         let ctx = super::super::VerifyCtx {
             restored_dir: d.path().to_path_buf(),
+            secret_temp_dir: d.path().join("secrets"),
             source_name: "acme-storage".into(),
             scratch_postgres: None,
             scratch_mongodb: None,

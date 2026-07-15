@@ -22,6 +22,8 @@ pub trait Repo {
     fn ensure_init(&self) -> Result<()>;
     fn backup(&self, path: &Path, tag: &str) -> Result<BackupSummary>;
     fn forget(&self, tag: &str, retention: &Retention) -> Result<()>;
+    fn prune(&self) -> Result<()>;
+    fn check(&self) -> Result<()>;
     fn snapshots(&self, tag: Option<&str>) -> Result<Vec<Snapshot>>;
     fn restore(&self, snapshot_id: &str, dest: &Path) -> Result<()>;
 }
@@ -46,12 +48,29 @@ pub fn forget_args(tag: &str, r: &Retention) -> Vec<String> {
         "forget".into(),
         "--tag".into(),
         tag.into(),
+        // Source identity is encoded in the tag. Grouping only by tags keeps
+        // retention stable across container hostnames and configured path
+        // changes.
+        "--group-by".into(),
+        "tags".into(),
         "--keep-daily".into(),
         r.daily.to_string(),
         "--keep-weekly".into(),
         r.weekly.to_string(),
         "--keep-monthly".into(),
         r.monthly.to_string(),
+        "--json".into(),
+    ]
+}
+
+pub fn backup_args(path: &Path, tag: &str, host: &str) -> Vec<String> {
+    vec![
+        "backup".into(),
+        path.display().to_string(),
+        "--tag".into(),
+        tag.into(),
+        "--host".into(),
+        host.into(),
         "--json".into(),
     ]
 }
@@ -72,15 +91,17 @@ pub struct ResticCli {
     repo: String,
     password: String,
     bin: String,
+    host: String,
     timeout: std::time::Duration,
 }
 
 impl ResticCli {
-    pub fn new(repo: String, password: String) -> Self {
+    pub fn new(repo: String, password: String, host: String) -> Self {
         Self {
             repo,
             password,
             bin: "restic".into(),
+            host,
             timeout: std::time::Duration::from_secs(240 * 60),
         }
     }
@@ -90,12 +111,23 @@ impl ResticCli {
         self
     }
 
+    /// Initialize a repository only when explicitly requested by an
+    /// operator. Routine backups never translate an authentication or
+    /// network error into an attempted repository creation.
+    pub fn initialize(&self) -> Result<()> {
+        self.run(&["init".into()]).map(|_| ())
+    }
+
+    pub fn probe(&self) -> Result<()> {
+        self.run(&["cat".into(), "config".into()]).map(|_| ())
+    }
+
     fn run(&self, args: &[String]) -> Result<String> {
         let mut cmd = Command::new(&self.bin);
         cmd.args(args)
             .env("RESTIC_REPOSITORY", &self.repo)
-            .env("RESTIC_PASSWORD", &self.password)
-            .env_remove("VAULTKEEPER_MASTER_KEY");
+            .env("RESTIC_PASSWORD", &self.password);
+        scrub_non_restic_secrets(&mut cmd);
         let out = crate::util::output_with_timeout(&mut cmd, self.timeout)?;
         if !out.status.success() {
             let truncated =
@@ -110,32 +142,34 @@ impl ResticCli {
     }
 }
 
+fn scrub_non_restic_secrets(command: &mut Command) {
+    command
+        .env_remove("VAULTKEEPER_MASTER_KEY")
+        .env_remove("VAULTKEEPER_RESTORE_TARGET");
+}
+
 impl Repo for ResticCli {
     fn ensure_init(&self) -> Result<()> {
-        match self.run(&["cat".into(), "config".into()]) {
-            Ok(_) => Ok(()),
-            Err(probe_err) => match self.run(&["init".into()]) {
-                Ok(_) => Ok(()),
-                Err(init_err) => Err(init_err.context(format!(
-                    "restic init failed after repo probe also failed: {probe_err:#}"
-                ))),
-            },
-        }
+        self.probe().context(
+            "restic repository is unavailable or uninitialized; verify credentials/network, or run `vaultkeeper init-repository` once",
+        )
     }
 
     fn backup(&self, path: &Path, tag: &str) -> Result<BackupSummary> {
-        let out = self.run(&[
-            "backup".into(),
-            path.display().to_string(),
-            "--tag".into(),
-            tag.into(),
-            "--json".into(),
-        ])?;
+        let out = self.run(&backup_args(path, tag, &self.host))?;
         parse_backup_output(&out)
     }
 
     fn forget(&self, tag: &str, retention: &Retention) -> Result<()> {
         self.run(&forget_args(tag, retention)).map(|_| ())
+    }
+
+    fn prune(&self) -> Result<()> {
+        self.run(&["prune".into()]).map(|_| ())
+    }
+
+    fn check(&self) -> Result<()> {
+        self.run(&["check".into()]).map(|_| ())
     }
 
     fn snapshots(&self, tag: Option<&str>) -> Result<Vec<Snapshot>> {
@@ -203,6 +237,8 @@ mod tests {
                 "forget",
                 "--tag",
                 "source=acme-db",
+                "--group-by",
+                "tags",
                 "--keep-daily",
                 "7",
                 "--keep-weekly",
@@ -214,6 +250,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn backup_uses_stable_configured_host() {
+        assert_eq!(
+            backup_args(Path::new("/data/run-42"), "source=acme-db", "vaultkeeper"),
+            vec![
+                "backup",
+                "/data/run-42",
+                "--tag",
+                "source=acme-db",
+                "--host",
+                "vaultkeeper",
+                "--json"
+            ]
+        );
+    }
+
+    #[test]
+    fn restic_child_does_not_inherit_vault_or_restore_credentials() {
+        let mut command = Command::new("unused");
+        scrub_non_restic_secrets(&mut command);
+        for name in ["VAULTKEEPER_MASTER_KEY", "VAULTKEEPER_RESTORE_TARGET"] {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == name && value.is_none()),
+                "{name} must be explicitly removed from restic's environment"
+            );
+        }
+    }
+
     struct FakeRepo(Vec<Snapshot>);
     impl Repo for FakeRepo {
         fn ensure_init(&self) -> Result<()> {
@@ -223,6 +289,12 @@ mod tests {
             unreachable!()
         }
         fn forget(&self, _t: &str, _r: &crate::types::Retention) -> Result<()> {
+            unreachable!()
+        }
+        fn prune(&self) -> Result<()> {
+            unreachable!()
+        }
+        fn check(&self) -> Result<()> {
             unreachable!()
         }
         fn snapshots(&self, _t: Option<&str>) -> Result<Vec<Snapshot>> {

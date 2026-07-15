@@ -38,6 +38,84 @@ pub fn dir_stats(root: &std::path::Path) -> anyhow::Result<(u64, u64)> {
     Ok((files, bytes))
 }
 
+/// Creates a private directory, including missing parents. On Unix the final
+/// directory is forced to owner-only access even when it already existed.
+pub fn ensure_private_dir(path: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("failed to create private directory {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to secure directory {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Copies a restored payload into a new durable directory without following
+/// symlinks. Refusing an existing destination prevents a repeated restore
+/// from silently overwriting an operator's exported files.
+pub fn copy_tree_new(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> anyhow::Result<(u64, u64)> {
+    use anyhow::{bail, Context};
+
+    anyhow::ensure!(source.is_dir(), "copy source is not a directory");
+    let parent = destination
+        .parent()
+        .context("durable restore destination has no parent")?;
+    ensure_private_dir(parent)?;
+    anyhow::ensure!(
+        std::fs::symlink_metadata(destination).is_err(),
+        "restore destination {} already exists",
+        destination.display()
+    );
+    // Build the entire export in a private sibling and rename only after a
+    // successful copy. Any mid-copy failure drops and removes the temporary
+    // directory instead of leaving a partial result that looks usable.
+    let temporary = tempfile::Builder::new()
+        .prefix(".vaultkeeper-restore-")
+        .tempdir_in(parent)
+        .with_context(|| format!("failed to stage restore under {}", parent.display()))?;
+
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    let mut stack = vec![(source.to_path_buf(), temporary.path().to_path_buf())];
+    while let Some((src_dir, dst_dir)) = stack.pop() {
+        for entry in std::fs::read_dir(&src_dir)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let src = entry.path();
+            let dst = dst_dir.join(entry.file_name());
+            if kind.is_symlink() {
+                bail!("refusing symlink in restored payload at {}", src.display());
+            }
+            if kind.is_dir() {
+                std::fs::create_dir(&dst)?;
+                stack.push((src, dst));
+            } else if kind.is_file() {
+                bytes = bytes.saturating_add(std::fs::copy(&src, &dst)?);
+                files = files.saturating_add(1);
+            } else {
+                bail!(
+                    "refusing special file in restored payload at {}",
+                    src.display()
+                );
+            }
+        }
+    }
+    std::fs::rename(temporary.path(), destination).with_context(|| {
+        format!(
+            "restore destination {} already exists or could not be finalized",
+            destination.display()
+        )
+    })?;
+    Ok((files, bytes))
+}
+
 pub fn truncate_marked(s: &str, max_chars: usize) -> String {
     let mut out: String = s.chars().take(max_chars).collect();
     if s.chars().count() > max_chars {
@@ -221,6 +299,36 @@ mod tests {
         std::fs::write(d.path().join("a.bin"), b"12345").unwrap();
         std::fs::write(d.path().join("sub").join("b.bin"), b"123").unwrap();
         assert_eq!(dir_stats(d.path()).unwrap(), (2, 8));
+    }
+
+    #[test]
+    fn copy_tree_new_preserves_files_and_refuses_overwrite() {
+        let d = tempfile::tempdir().unwrap();
+        let source = d.path().join("source");
+        let destination = d.path().join("exports").join("snapshot");
+        std::fs::create_dir_all(source.join("sub")).unwrap();
+        std::fs::write(source.join("sub").join("fn.ts"), b"hello").unwrap();
+        assert_eq!(copy_tree_new(&source, &destination).unwrap(), (1, 5));
+        assert_eq!(
+            std::fs::read(destination.join("sub").join("fn.ts")).unwrap(),
+            b"hello"
+        );
+        assert!(copy_tree_new(&source, &destination).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_failure_does_not_publish_partial_restore() {
+        use std::os::unix::fs::symlink;
+
+        let d = tempfile::tempdir().unwrap();
+        let source = d.path().join("source");
+        let destination = d.path().join("exports").join("snapshot");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("copied-first.txt"), b"partial").unwrap();
+        symlink("copied-first.txt", source.join("refused-link")).unwrap();
+        assert!(copy_tree_new(&source, &destination).is_err());
+        assert!(!destination.exists());
     }
 
     #[test]

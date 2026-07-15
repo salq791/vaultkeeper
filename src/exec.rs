@@ -10,6 +10,7 @@ pub(crate) fn build_repo(cfg: &config::Config) -> restic::ResticCli {
     let mut repo = restic::ResticCli::new(
         cfg.global.restic_repo.clone(),
         cfg.global.restic_password.clone(),
+        cfg.global.restic_host.clone(),
     );
     if let Some(mins) = cfg.global.restic_timeout_minutes {
         repo = repo.with_timeout(std::time::Duration::from_secs(mins.saturating_mul(60)));
@@ -64,6 +65,7 @@ pub fn execute_source(
         &repo,
         &source,
         &cfg.global.staging_dir,
+        &cfg.global.secret_temp_dir,
         engine.as_ref(),
     );
     match &result {
@@ -119,6 +121,14 @@ pub fn execute_verify(
             return Err(e);
         }
     };
+    let heartbeat = match st.start_heartbeat(run_id) {
+        Ok(heartbeat) => heartbeat,
+        Err(error) => {
+            let detail = crate::util::truncate_marked(&format!("{error:#}"), 4000);
+            let _ = st.finish_run(run_id, "verify_failed", None, None, Some(&detail));
+            return Err(error);
+        }
+    };
 
     let workdir = restore_workdir(&cfg.global.staging_dir, "verify", &source.name);
     let result = (|| -> Result<String> {
@@ -129,6 +139,7 @@ pub fn execute_verify(
         repo.restore(&snap.id, &workdir)?;
         let ctx = engines::VerifyCtx {
             restored_dir: workdir.clone(),
+            secret_temp_dir: cfg.global.secret_temp_dir.clone(),
             source_name: source.name.clone(),
             scratch_postgres: cfg.verify.postgres_url.clone(),
             scratch_mongodb: cfg.verify.mongodb_uri.clone(),
@@ -137,6 +148,7 @@ pub fn execute_verify(
         };
         engine.verify(&ctx)
     })();
+    drop(heartbeat);
     let _ = std::fs::remove_dir_all(&workdir);
 
     let (status, detail) = match &result {
@@ -185,12 +197,21 @@ pub fn execute_restore(
     target: Option<&str>,
     force_same_host: bool,
     confirm_remote_overwrite: bool,
+    confirmed_source: Option<&str>,
 ) -> Result<()> {
     let st = store::Store::open(db_path, crypto::MasterKey::from_env()?)?;
     let source = st.get_source(source_name)?;
     let engine = engines::engine_for(&source.engine)?;
     let repo = build_repo(cfg);
     let run_id = st.start_run(source.id, "restore")?;
+    let heartbeat = match st.start_heartbeat(run_id) {
+        Ok(heartbeat) => heartbeat,
+        Err(error) => {
+            let detail = crate::util::truncate_marked(&format!("{error:#}"), 4000);
+            let _ = st.finish_run(run_id, "failed", None, None, Some(&detail));
+            return Err(error);
+        }
+    };
 
     let workdir = restore_workdir(&cfg.global.staging_dir, "restore", &source.name);
     let result = (|| -> Result<()> {
@@ -204,15 +225,23 @@ pub fn execute_restore(
         repo.restore(&snap_id, &workdir)?;
         let ctx = engines::RestoreCtx {
             restored_dir: workdir.clone(),
+            durable_output_dir: durable_restore_dir(
+                &cfg.global.restore_output_dir,
+                &source.name,
+                &snap_id,
+            ),
+            secret_temp_dir: cfg.global.secret_temp_dir.clone(),
             source_name: source.name.clone(),
             target: target.map(|t| t.to_string()),
             force_same_host,
             confirm_remote_overwrite,
+            confirmed_source: confirmed_source.map(str::to_string),
             settings: source.settings.clone(),
             secrets: source.secrets.clone(),
         };
         engine.restore(&ctx)
     })();
+    drop(heartbeat);
     let _ = std::fs::remove_dir_all(&workdir);
 
     match &result {
@@ -231,6 +260,63 @@ pub fn execute_restore(
     result
 }
 
+/// Reclaim repository space after retention has removed snapshot references,
+/// then verify repository integrity. This is scheduled separately from each
+/// backup because prune can be expensive and requires an exclusive lock.
+pub fn execute_maintenance(cfg: &config::Config) -> Result<()> {
+    use crate::restic::Repo as _;
+
+    let result = (|| {
+        let repo = build_repo(cfg);
+        repo.ensure_init()?;
+        repo.prune()?;
+        repo.check()?;
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        let detail = crate::util::truncate_marked(&format!("{error:#}"), 2000);
+        match Notifier::from_notify(&cfg.notify) {
+            Ok(notifier) => notifier.notify(
+                "repository-maintenance",
+                None,
+                &RunEvent::Finished {
+                    status: "failed",
+                    snapshot_id: None,
+                    detail: Some(&detail),
+                },
+            ),
+            Err(notify_error) => tracing::warn!(
+                "could not construct notifier for repository maintenance failure: {notify_error:#}"
+            ),
+        }
+    }
+    result
+}
+
+/// Produce a traversal-safe, deterministic output directory for file-based
+/// restores. Ordinary restic snapshot IDs remain readable; arbitrary
+/// selectors are represented by a short SHA-256 label.
+pub fn durable_restore_dir(
+    root: &std::path::Path,
+    source_name: &str,
+    snapshot_selector: &str,
+) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+
+    let safe = !snapshot_selector.is_empty()
+        && snapshot_selector.len() <= 64
+        && snapshot_selector
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
+    let component = if safe {
+        snapshot_selector.to_string()
+    } else {
+        let digest = hex::encode(Sha256::digest(snapshot_selector.as_bytes()));
+        format!("selector-{}", &digest[..16])
+    };
+    root.join(source_name).join(component)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +327,16 @@ mod tests {
         assert!(d.ends_with(std::path::Path::new(".verify/acme-db")));
         let r = restore_workdir(std::path::Path::new("/staging"), "restore", "acme-db");
         assert!(r.ends_with(std::path::Path::new(".restore/acme-db")));
+    }
+
+    #[test]
+    fn durable_restore_dir_hashes_unsafe_snapshot_selectors() {
+        let path = durable_restore_dir(
+            std::path::Path::new("/data/restores"),
+            "acme-fns",
+            "../../latest",
+        );
+        assert!(path.starts_with("/data/restores/acme-fns"));
+        assert!(!path.to_string_lossy().contains(".."));
     }
 }

@@ -14,10 +14,40 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 pub struct Global {
     pub staging_dir: PathBuf,
+    #[serde(default = "default_secret_temp_dir")]
+    pub secret_temp_dir: PathBuf,
+    #[serde(default = "default_restore_output_dir")]
+    pub restore_output_dir: PathBuf,
     pub restic_repo: String,
     pub restic_password: String,
+    #[serde(default = "default_restic_host")]
+    pub restic_host: String,
     #[serde(default)]
     pub restic_timeout_minutes: Option<u64>,
+    #[serde(default = "default_maintenance_schedule")]
+    pub maintenance_schedule: String,
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
+}
+
+fn default_secret_temp_dir() -> PathBuf {
+    PathBuf::from("/run/vaultkeeper")
+}
+
+fn default_restore_output_dir() -> PathBuf {
+    PathBuf::from("/data/restores")
+}
+
+fn default_restic_host() -> String {
+    "vaultkeeper".to_string()
+}
+
+fn default_maintenance_schedule() -> String {
+    "0 3 * * 0".to_string()
+}
+
+fn default_timezone() -> String {
+    "UTC".to_string()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -42,6 +72,57 @@ pub struct VerifyCfg {
     pub mongodb_uri: Option<String>,
 }
 
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn validate_global(global: &Global) -> Result<()> {
+    anyhow::ensure!(
+        !global.restic_repo.trim().is_empty(),
+        "global restic_repo cannot be empty"
+    );
+    anyhow::ensure!(
+        !global.restic_password.is_empty(),
+        "global restic_password cannot be empty"
+    );
+    anyhow::ensure!(
+        !global.restic_host.trim().is_empty(),
+        "global restic_host cannot be empty"
+    );
+    if let Some(minutes) = global.restic_timeout_minutes {
+        anyhow::ensure!(minutes >= 1, "restic_timeout_minutes must be at least 1");
+    }
+    let paths = [
+        ("staging_dir", global.staging_dir.as_path()),
+        ("secret_temp_dir", global.secret_temp_dir.as_path()),
+        ("restore_output_dir", global.restore_output_dir.as_path()),
+    ];
+    for (name, path) in paths {
+        anyhow::ensure!(
+            !path.as_os_str().is_empty(),
+            "global {name} cannot be empty"
+        );
+        anyhow::ensure!(
+            !path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir)),
+            "global {name} cannot contain '..'"
+        );
+    }
+    for ((left_name, left), (right_name, right)) in paths.into_iter().zip(paths.into_iter().skip(1))
+    {
+        anyhow::ensure!(
+            !paths_overlap(left, right),
+            "global {left_name} and {right_name} must not overlap"
+        );
+    }
+    anyhow::ensure!(
+        !paths_overlap(&global.staging_dir, &global.restore_output_dir),
+        "global staging_dir and restore_output_dir must not overlap"
+    );
+    Ok(())
+}
+
 /// Replace every ${NAME} with lookup(NAME); error naming the var when absent.
 fn interpolate(s: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String> {
     let mut out = String::with_capacity(s.len());
@@ -63,7 +144,9 @@ fn interpolate(s: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<Strin
 
 pub fn load_from_str(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config> {
     let interpolated = interpolate(text, lookup)?;
-    toml::from_str(&interpolated).context("invalid config.toml")
+    let config: Config = toml::from_str(&interpolated).context("invalid config.toml")?;
+    validate_global(&config.global)?;
+    Ok(config)
 }
 
 pub fn load(path: &Path) -> Result<Config> {
@@ -138,5 +221,35 @@ restic_password = "${RESTIC_PASSWORD}"
     fn restic_timeout_minutes_defaults_to_none_when_absent() {
         let cfg = load_from_str(SAMPLE_MINIMAL, &lookup).unwrap();
         assert_eq!(cfg.global.restic_timeout_minutes, None);
+    }
+
+    #[test]
+    fn operational_defaults_are_explicit_and_stable() {
+        let cfg = load_from_str(SAMPLE_MINIMAL, &lookup).unwrap();
+        assert_eq!(
+            cfg.global.secret_temp_dir,
+            PathBuf::from("/run/vaultkeeper")
+        );
+        assert_eq!(
+            cfg.global.restore_output_dir,
+            PathBuf::from("/data/restores")
+        );
+        assert_eq!(cfg.global.restic_host, "vaultkeeper");
+        assert_eq!(cfg.global.maintenance_schedule, "0 3 * * 0");
+        assert_eq!(cfg.global.timezone, "UTC");
+    }
+
+    #[test]
+    fn rejects_overlapping_secret_or_restore_paths() {
+        let overlapping = r#"
+[global]
+staging_dir = "/staging"
+secret_temp_dir = "/staging/secrets"
+restore_output_dir = "/data/restores"
+restic_repo = "local:/repo"
+restic_password = "password"
+"#;
+        let error = load_from_str(overlapping, &lookup).unwrap_err();
+        assert!(error.to_string().contains("must not overlap"));
     }
 }

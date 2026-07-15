@@ -14,7 +14,7 @@ mod util;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -43,6 +43,8 @@ enum Command {
     },
     /// Validate configuration, database, and required tools
     CheckConfig,
+    /// Explicitly initialize the configured restic repository
+    InitRepository,
     /// Run the scheduler daemon
     Daemon,
     /// Restore a snapshot into a target database
@@ -52,11 +54,12 @@ enum Command {
         #[arg(long)]
         snapshot: Option<String>,
         #[arg(long)]
-        target: Option<String>,
-        #[arg(long)]
         force_same_host: bool,
         #[arg(long)]
         confirm_remote_overwrite: bool,
+        /// Exact source name acknowledgement required for destructive database restores
+        #[arg(long)]
+        confirm_source: Option<String>,
     },
     /// Restore the latest snapshot into scratch databases and check it
     Verify {
@@ -81,7 +84,7 @@ enum SourceCmd {
         verify_schedule: Option<String>,
         #[arg(long)]
         settings_json: String,
-        /// JSON object of secret values, or '-' to read the JSON from stdin (recommended; keeps secrets out of argv and shell history)
+        /// Pass '-' and pipe a JSON object through stdin; inline secret values are refused
         #[arg(long)]
         secrets_json: String,
         /// daily,weekly,monthly (default 7,4,6)
@@ -133,6 +136,15 @@ fn which_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+fn probe_writable_directory(path: &std::path::Path) -> Result<()> {
+    util::ensure_private_dir(path)?;
+    tempfile::Builder::new()
+        .prefix(".vaultkeeper-write-check-")
+        .tempfile_in(path)
+        .with_context(|| format!("directory is not writable: {}", path.display()))?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -159,17 +171,20 @@ fn main() -> Result<()> {
                 if let Some(vs) = &verify_schedule {
                     schedule::validate(vs)?;
                 }
-                let secrets_json = if secrets_json == "-" {
-                    let mut buf = String::new();
-                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
-                        .context("failed to read secrets JSON from stdin")?;
-                    buf
-                } else {
-                    eprintln!(
-                        "warning: inline --secrets-json exposes secrets to the process table and shell history; prefer --secrets-json -"
-                    );
-                    secrets_json
-                };
+                anyhow::ensure!(
+                    secrets_json == "-",
+                    "inline secret values are refused because process arguments are observable; pipe JSON to --secrets-json -"
+                );
+                let mut secrets_json = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut secrets_json)
+                    .context("failed to read secrets JSON from stdin")?;
+                let settings: serde_json::Value =
+                    serde_json::from_str(&settings_json).context("invalid --settings-json")?;
+                let secrets = serde_json::from_str::<HashMap<String, String>>(&secrets_json)
+                    .map_err(|_| {
+                        anyhow::anyhow!("invalid --secrets-json: pass a JSON object of string values (content not shown)")
+                    })?;
+                engines::validate_config(&engine, &settings, &secrets)?;
                 let st = open_store()?;
                 st.add_source(&store::NewSource {
                     name: name.clone(),
@@ -179,12 +194,8 @@ fn main() -> Result<()> {
                     retention: types::Retention::parse_csv(&retention)?,
                     healthchecks_uuid,
                     verify_healthchecks_uuid,
-                    settings: serde_json::from_str(&settings_json)
-                        .context("invalid --settings-json")?,
-                    secrets: serde_json::from_str::<HashMap<String, String>>(&secrets_json)
-                        .map_err(|_| {
-                            anyhow::anyhow!("invalid --secrets-json: pass a JSON object of string values (content not shown)")
-                        })?,
+                    settings,
+                    secrets,
                 })?;
                 println!("added source {name}");
                 Ok(())
@@ -238,9 +249,42 @@ fn main() -> Result<()> {
             let cfg = config::load(&config_path())?;
             let st = open_store()?;
             let sources = st.list_sources()?;
-            println!("config ok: staging={}", cfg.global.staging_dir.display());
             println!("db ok: {} sources", sources.len());
             let mut problems = 0usize;
+            for (label, directory) in [
+                ("staging", cfg.global.staging_dir.as_path()),
+                ("secret_temp", cfg.global.secret_temp_dir.as_path()),
+                ("restore_output", cfg.global.restore_output_dir.as_path()),
+            ] {
+                match probe_writable_directory(directory) {
+                    Ok(()) => println!("{label}: writable ({})", directory.display()),
+                    Err(error) => {
+                        println!("{label}: INVALID: {error}");
+                        problems += 1;
+                    }
+                }
+            }
+            if let Err(error) = cfg.global.timezone.parse::<chrono_tz::Tz>() {
+                println!("timezone: INVALID: {error}");
+                problems += 1;
+            } else {
+                println!("timezone: {}", cfg.global.timezone);
+            }
+            if let Err(error) = schedule::validate(&cfg.global.maintenance_schedule) {
+                println!("maintenance_schedule: INVALID: {error}");
+                problems += 1;
+            } else {
+                println!("maintenance_schedule: {}", cfg.global.maintenance_schedule);
+            }
+            let repo = exec::build_repo(&cfg);
+            match repo.probe() {
+                Ok(()) => println!("restic repository: reachable and initialized"),
+                Err(error) => {
+                    println!("restic repository: UNREACHABLE: {error}");
+                    problems += 1;
+                }
+            }
+            let mut required_tools = BTreeSet::from(["restic"]);
             for src in &sources {
                 for (label, expr) in [
                     ("schedule", Some(src.schedule.as_str())),
@@ -267,8 +311,22 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+                match engines::validate_config(&src.engine, &src.settings, &src.secrets) {
+                    Ok(()) => println!("{}: engine config ok ({})", src.name, src.engine),
+                    Err(error) => {
+                        println!("{}: engine config INVALID: {error}", src.name);
+                        problems += 1;
+                    }
+                }
+                match engines::required_tools(&src.engine) {
+                    Ok(tools) => required_tools.extend(tools.iter().copied()),
+                    Err(error) => {
+                        println!("{}: engine INVALID: {error}", src.name);
+                        problems += 1;
+                    }
+                }
             }
-            for tool in ["restic", "pg_dump", "mongodump", "rclone", "supabase"] {
+            for tool in required_tools {
                 let found = tool_on_path(tool);
                 if !found {
                     problems += 1;
@@ -294,11 +352,23 @@ fn main() -> Result<()> {
                 println!("notify: {}", channels.join(", "));
             }
             let mut scratch = Vec::new();
-            if cfg.verify.postgres_url.is_some() {
-                scratch.push("postgres scratch configured");
+            if let Some(url) = &cfg.verify.postgres_url {
+                match engines::postgres::parse_pg_url(url) {
+                    Ok(_) => scratch.push("postgres scratch URL valid"),
+                    Err(error) => {
+                        println!("verify postgres: INVALID: {error}");
+                        problems += 1;
+                    }
+                }
             }
-            if cfg.verify.mongodb_uri.is_some() {
-                scratch.push("mongodb scratch configured");
+            if let Some(uri) = &cfg.verify.mongodb_uri {
+                match engines::mongodb::uri_endpoints(uri) {
+                    Ok(_) => scratch.push("mongodb scratch URI valid"),
+                    Err(error) => {
+                        println!("verify mongodb: INVALID: {error}");
+                        problems += 1;
+                    }
+                }
             }
             if scratch.is_empty() {
                 println!("verify: no scratch databases configured");
@@ -306,6 +376,13 @@ fn main() -> Result<()> {
                 println!("verify: {}", scratch.join(", "));
             }
             anyhow::ensure!(problems == 0, "check-config found {problems} problem(s)");
+            Ok(())
+        }
+        Command::InitRepository => {
+            let cfg = config::load(&config_path())?;
+            let repo = exec::build_repo(&cfg);
+            repo.initialize()?;
+            println!("restic repository initialized");
             Ok(())
         }
         Command::Daemon => {
@@ -318,22 +395,14 @@ fn main() -> Result<()> {
         Command::Restore {
             source,
             snapshot,
-            target,
             force_same_host,
             confirm_remote_overwrite,
+            confirm_source,
         } => {
             let cfg = config::load(&config_path())?;
-            let target = match target {
-                Some(t) => {
-                    eprintln!(
-                        "warning: inline --target exposes the database password to the process table and shell history; prefer VAULTKEEPER_RESTORE_TARGET"
-                    );
-                    Some(t)
-                }
-                None => std::env::var("VAULTKEEPER_RESTORE_TARGET")
-                    .ok()
-                    .filter(|s| !s.is_empty()),
-            };
+            let target = std::env::var("VAULTKEEPER_RESTORE_TARGET")
+                .ok()
+                .filter(|s| !s.is_empty());
             exec::execute_restore(
                 &cfg,
                 &db_path(),
@@ -342,6 +411,7 @@ fn main() -> Result<()> {
                 target.as_deref(),
                 force_same_host,
                 confirm_remote_overwrite,
+                confirm_source.as_deref(),
             )?;
             println!("restore of {source} complete");
             Ok(())

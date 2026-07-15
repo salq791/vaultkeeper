@@ -1,6 +1,6 @@
 [package]
 name = "vaultkeeper"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Self-hosted backup orchestrator for Supabase, PostgreSQL, and MongoDB with restic repositories"
@@ -23,12 +23,11 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 wait-timeout = "0.2"
 croner = "2"
 chrono = "0.4"
-aws-config = "1"
-aws-sdk-sesv2 = "1"
+chrono-tz = "0.10"
+aws-config = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sesv2 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
 url = "2"
 percent-encoding = "2"
-ratatui = "0.29"
-
-[dev-dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
 tempfile = "3"

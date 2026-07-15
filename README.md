@@ -1,60 +1,145 @@
 # vaultkeeper
 
-Self-hosted backup orchestrator for Supabase, PostgreSQL, and MongoDB.
-One Rust binary, one container: scheduled logical backups into a
-deduplicated, encrypted restic repository (BorgBase or any restic backend),
-with restore and scheduled restore-verification as first-class features.
+Self-hosted backup orchestration for Supabase, PostgreSQL, and MongoDB.
+Vaultkeeper runs as one Rust binary in one container and writes scheduled
+logical backups to an encrypted, deduplicated restic repository.
 
-> Status: under active development, pre-v1. The design spec lives in
-> [docs/superpowers/specs/](docs/superpowers/specs/).
+> Status: pre-v1. Restore into a disposable target and review the security
+> model before relying on it for production recovery.
 
-## Why
+## What it backs up
 
-Backing up a Supabase project means more than pg_dump: Storage files and
-Edge Functions live outside Postgres. Vaultkeeper backs up all of it:
+- PostgreSQL databases, including Supabase Postgres, with `pg_dump`
+- MongoDB with `mongodump`
+- Supabase Storage through its S3-compatible endpoint
+- Supabase Edge Function source from the Management API, locally mounted
+  `deno.json`/import-map files, and the project's Auth configuration
 
-- Postgres databases (vanilla servers and Supabase, via pg_dump)
-- MongoDB (via mongodump)
-- Supabase Storage files (via the S3-compatible endpoint)
-- Supabase Edge Functions source + auth configuration (via the Management API)
+Edge Function secrets, hosted Supabase PITR/WAL, and project-level settings
+such as custom domains and network restrictions are outside its scope.
 
-Everything lands in a restic repository: deduplication, encryption,
-retention pruning, append-only capability.
+## Safety and operations
 
-## Features
-
-- Postgres (vanilla and Supabase), MongoDB, Supabase Storage, and Supabase Edge Functions backups on cron schedules
-- Restic repositories (BorgBase or any restic backend): deduplication, encryption, retention pruning
-- Restore with same-host guards and snapshot selection; storage restores require explicit overwrite confirmation
-- Scheduled restore verification into scratch databases with row counts journaled
-- healthchecks.io dead-man switch, webhook, and SES email alerting
-- Hard timeouts on every child process; graceful SIGTERM shutdown; per-source concurrency guard
-- Credentials encrypted at rest (ChaCha20-Poly1305, master key from env), entered via stdin or the masked TUI form, never argv
-- Terminal UI for the whole loop: dashboard, history, sources, snapshots, restores
+- Credentials are encrypted in SQLite with ChaCha20-Poly1305. The master key
+  comes from the environment; secrets are accepted through stdin and are not
+  placed in child-process arguments.
+- PostgreSQL restores use one transaction and fail on the first error.
+  MongoDB restores use `--drop --stopOnError`; replica-set backups can capture
+  and replay the oplog.
+- Every database restore requires the exact source name to be typed. Restores
+  to a source endpoint are additionally refused unless explicitly overridden.
+- Each backup applies daily/weekly/monthly `restic forget` retention grouped by
+  source tag. A separate scheduled maintenance job runs `restic prune` and
+  then `restic check`; failures reach configured webhook/SES channels.
+- Restore verification replays PostgreSQL and MongoDB snapshots into scratch
+  databases. Storage and Edge Function verification is structural: it restores
+  the snapshot locally and checks expected files and metadata.
+- Run leases are heartbeat-based, so a legitimate long backup is not mistaken
+  for an abandoned job. Compose's 14-hour-10-minute shutdown grace covers the
+  longest sequence of default child deadlines; increase it if you increase
+  those deadlines. The TUI will not quit while its worker is active.
 
 ## Deploy
 
-Prebuilt image: `ghcr.io/salq791/vaultkeeper:latest` (linux/amd64).
+The published image is `ghcr.io/salq791/vaultkeeper:latest` for linux/amd64.
+For a new repository:
 
-1. Copy `config.example.toml` to `config.toml` and `.env.example` to `.env`, then fill in your restic repository, its password, and your master key (`openssl rand -hex 32`).
-2. Start the daemon: `docker compose up -d`
-3. Add sources (secrets via stdin so they never touch your shell history):
+1. Copy `config.example.toml` to `config.toml` and `.env.example` to `.env`.
+   Set `RESTIC_PASSWORD`, a 32-byte hex `VAULTKEEPER_MASTER_KEY` generated with
+   `openssl rand -hex 32`, and your restic repository URL.
+2. Initialize the restic repository exactly once:
 
-    echo '{"password":"..."}' | docker compose exec -T vaultkeeper \
-      vaultkeeper source add --name my-db --engine postgres \
-      --schedule "0 2 * * *" \
-      --settings-json '{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}' \
-      --secrets-json -
+       docker compose run --rm vaultkeeper init-repository
 
-4. Restart the container so the daemon schedules the new source: `docker compose exec` adds it, then `docker compose restart vaultkeeper`.
-5. Scheduled restore verification needs the scratch databases. Set VERIFY_PG_PASSWORD in .env, then: `docker compose --profile verify up -d`, then add `--verify-schedule "0 5 * * 0"` to your sources.
-6. `docker compose exec vaultkeeper vaultkeeper check-config` exits nonzero if anything is misconfigured.
+   Do not run this against an existing repository. Vaultkeeper never attempts
+   initialization automatically when a repository probe fails.
+3. Start the service:
 
-Restores: `docker compose exec vaultkeeper vaultkeeper restore --source my-db` (target via the VAULTKEEPER_RESTORE_TARGET environment variable; same-host restores require --force-same-host).
+       docker compose up -d
+
+4. Add sources. Pipe secret JSON through stdin so it does not enter shell
+   history or the process list. For PostgreSQL:
+
+       echo '{"password":"..."}' | docker compose exec -T vaultkeeper \
+         vaultkeeper source add --name my-db --engine postgres \
+         --schedule "0 2 * * *" --verify-schedule "0 5 * * 0" \
+         --settings-json '{"host":"db.example.com","port":5432,"dbname":"app","user":"postgres"}' \
+         --secrets-json -
+
+5. Source changes are loaded when the daemon starts, so restart it after CLI
+   or TUI source changes:
+
+       docker compose restart vaultkeeper
+
+6. Validate directories, schedules, timezone, repository access, engine
+   settings, scratch URLs, and required executables:
+
+       docker compose exec vaultkeeper vaultkeeper check-config
+
+Cron expressions use five fields and are evaluated in `[global].timezone`, an
+IANA name such as `America/Toronto`. The default is `UTC`.
+
+### Source settings
+
+| Engine | Settings JSON | Secrets JSON | Important behavior |
+| --- | --- | --- | --- |
+| `postgres` | `host`, `port`, `dbname`, `user`; optional `sslmode`, `timeout_minutes` | `password` | Custom-format logical dump |
+| `mongodb` | `oplog: true` for a full replica-set dump, or explicitly `allow_inconsistent_dump: true`; optional `db`, `timeout_minutes` | `uri` | `oplog` cannot be combined with `db` |
+| `supabase_storage` | `endpoint`; optional `region`, `timeout_minutes` | `access_key`, `secret_key` | Mirrors all buckets through S3 |
+| `supabase_functions` | `project_ref`, `local_functions_dir`; optional `api_base`, `timeout_minutes` | `access_token` | Mount `local_functions_dir` read-only in Compose |
+
+MongoDB's recommended consistent mode requires a replica set and captures the
+whole replica set:
+
+    echo '{"uri":"mongodb://user:pass@mongo1:27017,mongo2:27017/?replicaSet=rs0"}' |
+      docker compose exec -T vaultkeeper vaultkeeper source add \
+        --name mongo --engine mongodb --schedule "30 2 * * *" \
+        --settings-json '{"oplog":true}' --secrets-json -
+
+The Supabase CLI download endpoint does not include import maps or Deno config.
+For Edge Functions, uncomment the read-only functions mount in
+`docker-compose.yml` and set `local_functions_dir` to the container path. Only
+`deno.json`, `deno.jsonc`, `import_map.json`, and `import_map.jsonc` are copied
+from that mount; function code still comes from Supabase.
+
+### Verification
+
+Set `VERIFY_PG_PASSWORD`, start the scratch databases, and configure a source's
+`--verify-schedule`:
+
+    docker compose --profile verify up -d
+    docker compose exec vaultkeeper vaultkeeper verify --source my-db
+
+Scratch targets must be disposable. Verification cleans/replaces their
+contents. It intentionally does not restore Storage back to the live service or
+redeploy Edge Functions.
+
+### Restore
+
+List snapshots with:
+
+    docker compose exec vaultkeeper vaultkeeper snapshots --source my-db
+
+Database restore credentials belong in `VAULTKEEPER_RESTORE_TARGET`, not
+`--target`. The exact source-name confirmation is always required:
+
+    docker compose exec \
+      -e VAULTKEEPER_RESTORE_TARGET='postgres://user:password@recovery-db:5432/app' \
+      vaultkeeper vaultkeeper restore --source my-db --confirm-source my-db
+
+If the target shares the source host and port, add `--force-same-host` only
+after verifying the destination database. MongoDB uses a MongoDB URI in the
+same environment variable.
+
+A Storage restore is destructive and requires `--confirm-remote-overwrite`.
+An Edge Functions restore does not deploy anything; it copies the selected
+snapshot to `/data/restores/<source>/<snapshot>` and prints manual deployment
+steps. The output directory must not already exist, preventing accidental
+overwrite.
 
 ## Terminal UI
 
-The whole operational loop, dashboard, history, source management, snapshot browsing, and restore, is also available as a full-screen terminal UI, running inside the same container:
+Run:
 
     docker compose exec -it vaultkeeper vaultkeeper tui
 
@@ -64,19 +149,34 @@ The whole operational loop, dashboard, history, source management, snapshot brow
 | Up / Down | Move selection |
 | r | Run backup on the selected source |
 | v | Run verify on the selected source |
-| a | Add a source (Sources tab) |
-| e | Edit the selected source (Sources tab) |
-| d | Enable/disable the selected source (Sources tab) |
-| Enter | Load snapshots for the selected source (Snapshots tab) |
-| R | Restore the selected snapshot (Snapshots tab) |
-| ? | Toggle this help |
-| q | Quit |
+| a / e / d | Add, edit, or enable/disable a source |
+| Enter | Load snapshots for the selected source |
+| R | Restore the selected snapshot |
+| ? | Toggle help |
+| q | Quit when no worker is active |
 
-Notes:
+The secrets field is write-only: editing a source never displays stored
+credentials, and leaving it blank keeps the existing value. The TUI does not
+offer overrides for same-host or remote-overwrite guards; use the CLI when an
+override is intentional.
 
-- Restores started from the TUI go through the same guards as the CLI: a same-host target is refused, and a storage restore that would overwrite the live bucket is refused. Neither guard has a TUI override; use `vaultkeeper restore --force-same-host` or `--confirm-remote-overwrite` on the CLI for those cases.
-- The add/edit source form enters credentials masked (shown as asterisks while typing) and only ever writes them out as an encrypted blob. The secrets field is write-only: editing a source never re-displays its stored credentials, and leaving it blank keeps the existing ones.
-- Sources added or edited in the TUI take effect on the next daemon restart; `r` ("run now") works immediately regardless.
+## Recovering Vaultkeeper itself
+
+The restic repository contains source payloads, not Vaultkeeper's control
+plane. Back up these separately:
+
+- `config.toml`
+- `.env` or, preferably, the secret-manager records that generate it
+- `/data/vaultkeeper.db`
+- the exact `VAULTKEEPER_MASTER_KEY` and restic credentials
+
+Without the master key, credentials in `vaultkeeper.db` cannot be decrypted.
+Keep an offline copy in a secrets manager, never in Git. A recovery drill is:
+restore those files onto a clean host, start with the same image version, run
+`check-config`, list snapshots, then restore one into disposable scratch
+infrastructure.
+
+See [SECURITY.md](SECURITY.md) for plaintext staging and trust-boundary details.
 
 ## License
 

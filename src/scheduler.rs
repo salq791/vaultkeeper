@@ -1,8 +1,9 @@
 use crate::{config, crypto, exec, schedule, store};
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 
-pub fn sleep_duration(next: DateTime<Local>, now: DateTime<Local>) -> std::time::Duration {
+pub fn sleep_duration(next: DateTime<Tz>, now: DateTime<Tz>) -> std::time::Duration {
     (next - now).to_std().unwrap_or(std::time::Duration::ZERO)
 }
 
@@ -17,17 +18,22 @@ pub fn verify_jobs(sources: &[(String, String, Option<String>)]) -> Vec<(String,
 }
 
 pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
+    let timezone: Tz = cfg
+        .global
+        .timezone
+        .parse()
+        .with_context(|| format!("invalid IANA timezone '{}'", cfg.global.timezone))?;
+    schedule::validate(&cfg.global.maintenance_schedule)
+        .context("invalid global maintenance_schedule")?;
     let st = store::Store::open(&db_path, crypto::MasterKey::from_env()?)?;
     let cleared = st.reconcile_stale_running()?;
     if cleared > 0 {
-        tracing::warn!(
-            "cleared {cleared} zombie 'running' row(s) older than 24h from a previous process"
-        );
+        tracing::warn!("cleared {cleared} run row(s) whose heartbeat lease expired");
     }
     let fresh_running = st.count_running()?;
     if fresh_running > 0 {
         tracing::info!(
-            "{} run row(s) still marked running (fresh, possibly in flight); they clear via the 24h bound if abandoned",
+            "{} run row(s) still marked running with a fresh heartbeat",
             fresh_running
         );
     }
@@ -40,10 +46,8 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
     drop(st);
     if sources.is_empty() {
         tracing::warn!(
-            "no enabled sources configured; the daemon is idle. Add a source, then restart the container (docker compose restart vaultkeeper) to schedule it"
+            "no enabled sources configured; only repository maintenance will be scheduled"
         );
-        shutdown_signal().await;
-        return Ok(());
     }
     for (name, schedule, verify_schedule) in &sources {
         schedule::validate(schedule).with_context(|| format!("source {name}"))?;
@@ -53,10 +57,11 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
     }
     let verify_jobs = verify_jobs(&sources);
     tracing::info!(
-        "daemon starting with {} enabled source(s), {} scheduled verif{}; source changes require a restart",
+        "daemon starting with {} enabled source(s), {} scheduled verif{} in timezone {}; source changes require a restart",
         sources.len(),
         verify_jobs.len(),
-        if verify_jobs.len() == 1 { "y" } else { "ies" }
+        if verify_jobs.len() == 1 { "y" } else { "ies" },
+        timezone
     );
 
     let repo = exec::build_repo(&cfg);
@@ -76,7 +81,8 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
         let mut shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
             loop {
-                let next = match schedule::next_occurrence(&schedule_expr, Local::now()) {
+                let now = Utc::now().with_timezone(&timezone);
+                let next = match schedule::next_occurrence(&schedule_expr, now) {
                     Ok(n) => n,
                     Err(e) => {
                         tracing::error!("{}: schedule error, stopping this source: {e:#}", name);
@@ -85,7 +91,7 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
                 };
                 tracing::info!("{}: next run at {}", name, next);
                 tokio::select! {
-                    _ = tokio::time::sleep(sleep_duration(next, Local::now())) => {}
+                    _ = tokio::time::sleep(sleep_duration(next, Utc::now().with_timezone(&timezone))) => {}
                     _ = shutdown.changed() => {
                         tracing::info!("{}: shutdown requested", name);
                         return;
@@ -113,7 +119,8 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
         let mut shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
             loop {
-                let next = match schedule::next_occurrence(&schedule_expr, Local::now()) {
+                let now = Utc::now().with_timezone(&timezone);
+                let next = match schedule::next_occurrence(&schedule_expr, now) {
                     Ok(n) => n,
                     Err(e) => {
                         tracing::error!(
@@ -125,7 +132,7 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
                 };
                 tracing::info!("{}: next verify at {}", name, next);
                 tokio::select! {
-                    _ = tokio::time::sleep(sleep_duration(next, Local::now())) => {}
+                    _ = tokio::time::sleep(sleep_duration(next, Utc::now().with_timezone(&timezone))) => {}
                     _ = shutdown.changed() => {
                         tracing::info!("{}: shutdown requested", name);
                         return;
@@ -142,6 +149,40 @@ pub async fn run_daemon(cfg: config::Config, db_path: String) -> Result<()> {
                     }
                     Ok(Err(e)) => tracing::error!("{}: verify failed: {e:#}", name),
                     Err(e) => tracing::error!("{}: verify panicked: {e}", name),
+                }
+            }
+        }));
+    }
+
+    {
+        let cfg = cfg.clone();
+        let mut shutdown = shutdown_rx.clone();
+        let schedule_expr = cfg.global.maintenance_schedule.clone();
+        handles.push(tokio::spawn(async move {
+            loop {
+                let now = Utc::now().with_timezone(&timezone);
+                let next = match schedule::next_occurrence(&schedule_expr, now) {
+                    Ok(next) => next,
+                    Err(error) => {
+                        tracing::error!("repository maintenance schedule error: {error:#}");
+                        return;
+                    }
+                };
+                tracing::info!("next repository prune/check at {}", next);
+                tokio::select! {
+                    _ = tokio::time::sleep(sleep_duration(next, Utc::now().with_timezone(&timezone))) => {}
+                    _ = shutdown.changed() => {
+                        tracing::info!("repository maintenance: shutdown requested");
+                        return;
+                    }
+                }
+                let cfg = cfg.clone();
+                match tokio::task::spawn_blocking(move || exec::execute_maintenance(&cfg)).await {
+                    Ok(Ok(())) => tracing::info!("repository prune/check completed"),
+                    Ok(Err(error)) => {
+                        tracing::error!("repository prune/check failed: {error:#}")
+                    }
+                    Err(error) => tracing::error!("repository prune/check panicked: {error}"),
                 }
             }
         }));
@@ -183,8 +224,12 @@ mod tests {
 
     #[test]
     fn sleep_duration_positive_and_clamped() {
-        let now = chrono::Local.with_ymd_and_hms(2026, 1, 1, 1, 0, 0).unwrap();
-        let next = chrono::Local.with_ymd_and_hms(2026, 1, 1, 2, 0, 0).unwrap();
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 1, 1, 1, 0, 0)
+            .unwrap();
+        let next = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 1, 1, 2, 0, 0)
+            .unwrap();
         assert_eq!(
             sleep_duration(next, now),
             std::time::Duration::from_secs(3600)

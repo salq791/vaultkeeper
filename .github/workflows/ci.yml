@@ -2,7 +2,10 @@ name: CI
 on:
   push:
     branches: [master, main]
+    tags: ["v*.*.*"]
   pull_request:
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -14,9 +17,30 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --all-features --locked
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - name: Audit Rust dependencies
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit
+      - name: Scan repository history for secrets
+        run: |
+          curl -fsSL -o /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum --check
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --redact --no-banner
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -27,29 +51,48 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - run: sudo apt-get update && sudo apt-get install -y restic
-      - run: cargo test --test e2e_restic -- --ignored
+      - run: cargo test --locked --test e2e_restic -- --ignored
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [test, e2e, smoke]
+    needs: [test, security, e2e, smoke]
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Verify release tag before publishing
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)
+          test -n "${VERSION}"
+          test "v${VERSION}" = "${GITHUB_REF_NAME}"
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/salq791/vaultkeeper
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+            type=sha,format=long
+            type=ref,event=tag
+            type=semver,pattern={{version}}
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          push: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
-          tags: |
-            ghcr.io/salq791/vaultkeeper:latest
-            ghcr.io/salq791/vaultkeeper:sha-${{ github.sha }}
+          push: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -57,4 +100,30 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: docker build -t vaultkeeper:smoke .
+      - name: Scan built image for critical vulnerabilities
+        run: |
+          curl -fsSL -o /tmp/trivy.tar.gz https://github.com/aquasecurity/trivy/releases/download/v0.72.0/trivy_0.72.0_Linux-64bit.tar.gz
+          echo "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea  /tmp/trivy.tar.gz" | sha256sum --check
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          /tmp/trivy image --exit-code 1 --ignore-unfixed --severity CRITICAL vaultkeeper:smoke
       - run: bash scripts/smoke.sh
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [docker]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+      - name: Verify tag matches Cargo package version
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          test "v${VERSION}" = "${GITHUB_REF_NAME}"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes --title "Vaultkeeper ${GITHUB_REF_NAME}"

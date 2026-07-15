@@ -1,5 +1,6 @@
 //! Runs only where restic is installed: `cargo test --test e2e_restic -- --ignored`
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 const K: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
@@ -59,20 +60,47 @@ fn full_backup_into_local_restic_repo() {
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
 
-    run(&[
-        "source",
-        "add",
-        "--name",
-        "e2e-db",
-        "--engine",
-        "postgres",
-        "--schedule",
-        "0 2 * * *",
-        "--settings-json",
-        r#"{"host":"localhost","port":5432,"dbname":"app","user":"postgres"}"#,
-        "--secrets-json",
-        r#"{"password":"x"}"#,
-    ]);
+    let run_with_stdin = |args: &[&str], stdin: &[u8]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_vaultkeeper"))
+            .env("VAULTKEEPER_MASTER_KEY", K)
+            .env("VAULTKEEPER_DB", &db)
+            .env("VAULTKEEPER_CONFIG", &cfg_path)
+            .env("PATH", &path_env)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(stdin).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    run(&["init-repository"]);
+    run_with_stdin(
+        &[
+            "source",
+            "add",
+            "--name",
+            "e2e-db",
+            "--engine",
+            "postgres",
+            "--schedule",
+            "0 2 * * *",
+            "--settings-json",
+            r#"{"host":"localhost","port":5432,"dbname":"app","user":"postgres"}"#,
+            "--secrets-json",
+            "-",
+        ],
+        br#"{"password":"x"}"#,
+    );
     let out = run(&["run", "--source", "e2e-db"]);
     assert!(out.contains("snapshot"));
     let snaps = run(&["snapshots", "--source", "e2e-db"]);
@@ -100,12 +128,16 @@ fn full_backup_into_local_restic_repo() {
         .env("VAULTKEEPER_CONFIG", &cfg_path)
         .env("PATH", &path_env)
         .env("SHIM_MARKER", &marker)
+        .env(
+            "VAULTKEEPER_RESTORE_TARGET",
+            "postgres://u:pw@elsewhere.example.com:5432/restored",
+        )
         .args([
             "restore",
             "--source",
             "e2e-db",
-            "--target",
-            "postgres://u:pw@elsewhere.example.com:5432/restored",
+            "--confirm-source",
+            "e2e-db",
         ])
         .output()
         .unwrap();
@@ -116,6 +148,7 @@ fn full_backup_into_local_restic_repo() {
     );
     let argv = std::fs::read_to_string(&marker).unwrap();
     assert!(argv.contains("--clean"));
+    assert!(argv.contains("--single-transaction"));
     assert!(argv.contains("-d restored"));
     assert!(
         !argv.contains("pw"),

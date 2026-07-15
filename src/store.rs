@@ -3,10 +3,34 @@ use crate::types::Retention;
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub struct Store {
     conn: Connection,
     key: MasterKey,
+    db_path: Option<PathBuf>,
+}
+
+const RUN_LEASE_MINUTES: i64 = 5;
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Keeps a run lease fresh from a separate SQLite connection. Dropping the
+/// guard stops and joins the heartbeat thread before the run is finalized.
+pub struct RunHeartbeat {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for RunHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+    }
 }
 
 pub struct NewSource {
@@ -101,7 +125,8 @@ CREATE TABLE IF NOT EXISTS runs (
   status TEXT NOT NULL,
   bytes INTEGER,
   snapshot_id TEXT,
-  detail TEXT
+  detail TEXT,
+  heartbeat_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 "#;
 
@@ -140,10 +165,22 @@ impl Store {
         if !has_verify_hc {
             conn.execute_batch("ALTER TABLE sources ADD COLUMN verify_healthchecks_uuid TEXT;")?;
         }
+        let has_heartbeat: bool = conn
+            .prepare("PRAGMA table_info(runs)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|column| column == "heartbeat_at");
+        if !has_heartbeat {
+            conn.execute_batch("ALTER TABLE runs ADD COLUMN heartbeat_at TEXT;")?;
+            conn.execute_batch(
+                "UPDATE runs SET heartbeat_at = COALESCE(finished_at, started_at) WHERE heartbeat_at IS NULL;",
+            )?;
+        }
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
-        Ok(Self { conn, key })
+        let db_path = (path != ":memory:").then(|| PathBuf::from(path));
+        Ok(Self { conn, key, db_path })
     }
 
     pub fn add_source(&self, s: &NewSource) -> Result<i64> {
@@ -316,20 +353,20 @@ impl Store {
     }
 
     /// Starts a run, refusing if the source already has a run in progress.
-    /// A 'running' row older than 24 hours is treated as a crashed process's
-    /// zombie: it is marked 'stale' and no longer blocks. The INSERT below is
+    /// A 'running' row whose heartbeat is older than the lease is treated as
+    /// a crashed process's zombie and no longer blocks. The INSERT below is
     /// a single conditional statement, so the check-and-claim is atomic even
     /// across processes sharing the database file.
     pub fn start_run(&self, source_id: i64, kind: &str) -> Result<i64> {
         self.conn.execute(
             "UPDATE runs SET status = 'stale', finished_at = datetime('now')
              WHERE source_id = ?1 AND status = 'running'
-             AND started_at <= datetime('now', '-24 hours')",
-            params![source_id],
+             AND COALESCE(heartbeat_at, started_at) <= datetime('now', ?2)",
+            params![source_id, format!("-{RUN_LEASE_MINUTES} minutes")],
         )?;
         let inserted = self.conn.execute(
-            "INSERT INTO runs (source_id, kind, status)
-             SELECT ?1, ?2, 'running'
+            "INSERT INTO runs (source_id, kind, status, heartbeat_at)
+             SELECT ?1, ?2, 'running', datetime('now')
              WHERE NOT EXISTS (
                SELECT 1 FROM runs WHERE source_id = ?1 AND status = 'running'
              )",
@@ -337,9 +374,45 @@ impl Store {
         )?;
         anyhow::ensure!(
             inserted == 1,
-            "another run for this source is in progress; a run that crashed more than 24 hours ago clears automatically"
+            "another run for this source is in progress; an abandoned run clears after its heartbeat lease expires"
         );
         Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn start_heartbeat(&self, run_id: i64) -> Result<RunHeartbeat> {
+        let Some(db_path) = self.db_path.clone() else {
+            return Ok(RunHeartbeat {
+                stop: Arc::new(AtomicBool::new(true)),
+                handle: None,
+            });
+        };
+        // Open the independent connection before returning the guard. If this
+        // fails, the run must not continue without a functioning lease.
+        let connection = Connection::open(&db_path)
+            .with_context(|| format!("failed to open run {run_id} heartbeat database"))?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .context("failed to configure run heartbeat database")?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let handle = std::thread::Builder::new()
+            .name(format!("vaultkeeper-run-{run_id}-heartbeat"))
+            .spawn(move || {
+                while !worker_stop.load(Ordering::Acquire) {
+                    if let Err(error) = connection.execute(
+                        "UPDATE runs SET heartbeat_at = datetime('now') WHERE id = ?1 AND status = 'running'",
+                        params![run_id],
+                    ) {
+                        tracing::warn!("run {run_id} heartbeat update failed: {error}");
+                    }
+                    std::thread::park_timeout(HEARTBEAT_INTERVAL);
+                }
+            })
+            .context("failed to start run heartbeat thread")?;
+        Ok(RunHeartbeat {
+            stop,
+            handle: Some(handle),
+        })
     }
 
     pub fn finish_run(
@@ -358,15 +431,13 @@ impl Store {
         Ok(())
     }
 
-    /// Marks 'running' rows older than 24 hours stale at daemon boot. Fresh
-    /// running rows are left alone: a manual docker-exec run may legitimately
-    /// be in flight across a daemon restart, and rows it abandons clear via
-    /// the same 24h bound in start_run.
+    /// Marks rows whose heartbeat lease expired stale at daemon boot.
     pub fn reconcile_stale_running(&self) -> Result<u64> {
         let n = self.conn.execute(
             "UPDATE runs SET status = 'stale', finished_at = datetime('now')
-             WHERE status = 'running' AND started_at <= datetime('now', '-24 hours')",
-            [],
+             WHERE status = 'running'
+             AND COALESCE(heartbeat_at, started_at) <= datetime('now', ?1)",
+            params![format!("-{RUN_LEASE_MINUTES} minutes")],
         )?;
         Ok(n as u64)
     }
@@ -598,7 +669,7 @@ mod tests {
         let st = store();
         let sid = st.add_source(&sample()).unwrap();
         st.conn_for_tests().execute(
-            "INSERT INTO runs (source_id, kind, status, started_at) VALUES (?1, 'backup', 'running', datetime('now', '-25 hours'))",
+            "INSERT INTO runs (source_id, kind, status, started_at, heartbeat_at) VALUES (?1, 'backup', 'running', datetime('now', '-6 minutes'), datetime('now', '-6 minutes'))",
             rusqlite::params![sid],
         ).unwrap();
         let r2 = st.start_run(sid, "backup").unwrap();
@@ -628,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_clears_only_old_zombie_rows() {
+    fn reconcile_clears_only_expired_heartbeat_leases() {
         let st = store();
         let sid = st.add_source(&sample()).unwrap();
         // Fresh run first: start_run itself clears >24h rows for the source,
@@ -636,7 +707,7 @@ mod tests {
         let fresh = st.start_run(sid, "backup").unwrap();
         st.conn_for_tests()
             .execute(
-                "INSERT INTO runs (source_id, kind, status, started_at) VALUES (?1, 'backup', 'running', datetime('now', '-25 hours'))",
+                "INSERT INTO runs (source_id, kind, status, started_at, heartbeat_at) VALUES (?1, 'backup', 'running', datetime('now', '-6 minutes'), datetime('now', '-6 minutes'))",
                 rusqlite::params![sid],
             )
             .unwrap();
@@ -798,5 +869,20 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn fresh_heartbeat_keeps_a_long_running_job_leased() {
+        let st = store();
+        let sid = st.add_source(&sample()).unwrap();
+        st.conn_for_tests()
+            .execute(
+                "INSERT INTO runs (source_id, kind, status, started_at, heartbeat_at)
+                 VALUES (?1, 'backup', 'running', datetime('now', '-2 hours'), datetime('now'))",
+                rusqlite::params![sid],
+            )
+            .unwrap();
+        assert_eq!(st.reconcile_stale_running().unwrap(), 0);
+        assert!(st.start_run(sid, "verify").is_err());
     }
 }

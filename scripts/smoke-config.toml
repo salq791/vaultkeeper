@@ -1,7 +1,12 @@
 [global]
 staging_dir = "/staging"
+secret_temp_dir = "/run/vaultkeeper"
+restore_output_dir = "/data/restores"
 restic_repo = "/repo"
 restic_password = "${RESTIC_PASSWORD}"
+restic_host = "vaultkeeper-smoke"
+maintenance_schedule = "0 3 * * 0"
+timezone = "UTC"
 
 [verify]
 postgres_url = "postgres://verifier:p%40ss%2Fword@scratch-postgres:5432/scratch?sslmode=disable"

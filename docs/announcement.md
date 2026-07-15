@@ -1,31 +1,54 @@
-> DRAFT: for review before posting. Nothing below is published automatically.
+> DRAFT for the upcoming v0.1.1 release. Nothing here is published
+> automatically; edit this in your own voice before posting.
 
-# vaultkeeper: a self-hosted backup orchestrator for Supabase, Postgres, and MongoDB
+# vaultkeeper: verifiable backups for Supabase, Postgres, and MongoDB
 
-vaultkeeper is a single Rust binary, run as a single Docker container, that backs up:
+vaultkeeper is a self-hosted Rust backup orchestrator, packaged as one Docker
+container. It schedules logical backups for:
 
-- Postgres databases, vanilla or Supabase-hosted (via pg_dump)
-- MongoDB (via mongodump)
-- Supabase Storage files, through the project's S3-compatible endpoint
-- Supabase Edge Functions source and auth configuration, through the Management API
+- vanilla or Supabase-hosted PostgreSQL;
+- MongoDB, including consistent full-replica-set oplog capture;
+- Supabase Storage through its S3-compatible endpoint; and
+- Supabase Edge Function source, Deno/import-map configuration, and Auth
+  configuration.
 
-Backing up a Supabase project with pg_dump alone misses Storage and Edge Functions, so this covers all of it from one scheduler.
+Backups land in an encrypted, deduplicated restic repository. Retention is
+applied per source, while repository pruning and integrity checking run on a
+separate maintenance schedule.
 
-Backups land in a restic repository (BorgBase or any restic backend), which gives deduplication, encryption, and retention pruning without extra tooling.
+Database verification restores the latest snapshot into disposable Postgres or
+MongoDB instances and records row or document counts. Storage and Edge
+Functions verification restores locally and validates snapshot structure; it
+does not write to the live service. The CI smoke test also exercises explicit
+Postgres, MongoDB, Storage, and durable Edge Functions restore paths inside the
+built image.
 
-Each source can also have a scheduled verify job: it restores its latest snapshot into a scratch database and journals the result (row or document counts, or function/auth-config presence for Edge Functions), so backups are checked, not just taken.
+Restore guardrails require a typed source name for database restores, reject a
+matching source endpoint unless deliberately overridden, perform PostgreSQL
+cleanup in one transaction, and stop MongoDB on restore errors. Storage restore
+requires a separate destructive-overwrite flag. Edge Function restore produces
+a durable local directory and manual deployment instructions rather than
+silently modifying a project.
 
-Restore is a first-class command with guards: a restore to what looks like the source's own host is refused unless overridden, and a storage restore that would overwrite the live bucket needs an explicit confirmation flag. A terminal UI covers the whole loop, dashboard, history, source management, snapshot browsing, restore, with credentials entered masked and stored encrypted.
+The terminal UI covers source management, history, snapshots, run-now,
+verification, and guided restore. Stored credentials are encrypted; runtime
+MongoDB credential files live only in a private tmpfs. The security guide also
+documents the important boundary that local staging payloads are plaintext
+until restic encrypts them.
 
-## What it does not do
+## Deliberate limits
 
-- Edge Function secrets: these are write-only in Supabase by design, so vaultkeeper does not back them up. Your team's secrets vault stays the source of truth.
-- Point-in-time recovery on hosted Supabase: hosted Supabase does not expose the WAL access PITR needs, so vaultkeeper backs up with scheduled logical dumps instead.
-- Project settings such as custom domains, network restrictions, or pooler configuration: these change rarely and are left to be documented manually.
+- Supabase Edge Function secrets are write-only and are not backed up. Keep
+  your secrets manager as their source of truth.
+- Hosted Supabase does not expose the WAL stream needed for vaultkeeper-managed
+  PITR, so these are scheduled logical backups.
+- Custom domains, network restrictions, pooler settings, and similar project
+  configuration remain an operator responsibility.
+- Storage and Edge Function scheduled verification is structural rather than a
+  live-service writeback test.
 
-## Getting started
-
-The README's Deploy section is the quickstart: `docker compose up -d`, add a source, and the scheduler takes it from there.
+Start with the README's deployment, threat-model, and recovery sections, then
+run a restore drill against disposable infrastructure before production use.
 
 Repository: https://github.com/salq791/vaultkeeper
 
